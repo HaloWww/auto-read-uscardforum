@@ -9,6 +9,7 @@
 // @match        https://meta.appinn.net/*
 // @match        https://community.openai.com/
 // @match        https://idcflare.com/*
+// @match        https://www.uscardforum.com/*
 // @exclude      https://linux.do/a/9611/0
 // @grant        none
 // @license      MIT

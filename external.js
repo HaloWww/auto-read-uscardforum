@@ -24,8 +24,8 @@
     "https://community.openai.com",
     "https://idcflare.com/",
     "https://www.uscardforum.com/",
-  ];
-
+  ];  
+  const delayBeforeBrowsingNewTopic = 3000; // 进入新帖子后延迟3秒再开始浏览（单位：毫秒），可根据需要调整
   // 获取当前页面的URL
   const currentURL = window.location.href;
 
@@ -110,7 +110,10 @@
     const randomIndex = Math.floor(Math.random() * urls.length);
 
     // 根据随机索引选择一个URL
-    const nextTopicURL = urls[randomIndex]; // 在跳转之前，标记即将跳转到下一个话题
+    const nextTopicURL = urls[randomIndex];
+    // 设置标志，表示刚进入新帖子，需要延迟后再开始浏览
+    localStorage.setItem("justOpenedNewTopic", "true");
+    // 在跳转之前，标记即将跳转到下一个话题
     localStorage.setItem("navigatingToNextTopic", "true");
     // 尝试导航到下一个话题
     window.location.href = nextTopicURL;
@@ -161,13 +164,28 @@
             20
           );
         }, 2000); // 延迟2000毫秒（即2秒）
+  // 正常的加载事件处理
       } else {
         console.log("执行正常的滚动和检查逻辑");
-        // 执行正常的滚动和检查逻辑
-        checkScroll();
-        if (isAutoLikeEnabled()) {
-          //自动点赞
-          autoLike();
+        // 检查是否刚进入新帖子
+        if (localStorage.getItem("justOpenedNewTopic") === "true") {
+          console.log(`延迟 ${delayBeforeBrowsingNewTopic / 1000} 秒后开始浏览新帖子...`);
+          // 清除标志
+          localStorage.removeItem("justOpenedNewTopic");
+          // 延迟执行滚动和自动点赞
+          setTimeout(() => {
+            console.log("延迟时间到达，开始浏览");
+            checkScroll();
+            if (isAutoLikeEnabled()) {
+              autoLike();
+            }
+          }, delayBeforeBrowsingNewTopic);
+        } else {
+          checkScroll();
+          if (isAutoLikeEnabled()) {
+            //自动点赞
+            autoLike();
+          }
         }
       }
     }

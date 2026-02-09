@@ -8,6 +8,7 @@
 // @match        https://linux.do/*
 // @match        https://meta.appinn.net/*
 // @match        https://community.openai.com/
+// @match        https://www.uscardforum.com/*
 // @grant        none
 // @license      MIT
 // @icon         https://www.google.com/s2/favicons?domain=linux.do
@@ -21,6 +22,8 @@
     "https://linux.do",
     "https://meta.appinn.net",
     "https://community.openai.com",
+    "https://idcflare.com/",
+    "https://www.uscardforum.com/",
   ];
 
   // 获取当前页面的URL
@@ -71,7 +74,7 @@
     stopDistance = 9999999999,
     callback = undefined,
     distancePerStep = 20,
-    delayPerStep = 50
+    delayPerStep = 100
   ) {
     if (scrollInterval !== null) {
       clearInterval(scrollInterval);

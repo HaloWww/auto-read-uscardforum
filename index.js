@@ -29,9 +29,9 @@
     "https://idcflare.com/",
     "https://www.uscardforum.com/",
   ];
-  const commentLimit = 1000;
-  const topicListLimit = 100;
-  const likeLimit = 50;
+  const commentLimit = 2000;
+  const topicListLimit = 200;
+  const likeLimit = 20;
   // 获取当前页面的URL
   const currentURL = window.location.href;
 
@@ -71,7 +71,7 @@
   let checkScrollTimeout = null;
   let autoLikeInterval = null;
 
-  function scrollToBottomSlowly(distancePerStep = 20, delayPerStep = 50) {
+  function scrollToBottomSlowly(distancePerStep = 20, delayPerStep = 100) {
     if (scrollInterval !== null) {
       clearInterval(scrollInterval);
     }

@@ -76,7 +76,7 @@ const shutdownTimer = setTimeout(() => {
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
 const groupId = process.env.TELEGRAM_GROUP_ID;
-const specificUser = process.env.SPECIFIC_USER || "14790897";
+const specificUser = process.env.SPECIFIC_USER || "58800";
 const maxConcurrentAccounts = parseInt(process.env.MAX_CONCURRENT_ACCOUNTS) || 3; // 每批最多同时运行的账号数
 const usernames = process.env.USERNAMES.split(",");
 const passwords = process.env.PASSWORDS.split(",");

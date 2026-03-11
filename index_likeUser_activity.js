@@ -102,7 +102,7 @@
       // 举例：https://linux.do/user_actions.json?offset=0&username=14790897&filter=5
       //   const url = `${BASE_URL}/user_actions.json?offset=${lastOffset}&username=${specificUser}&filter=5`;
       //举例：https://linux.do/search?q=%4014790897%20in%3Aunseen
-      const url = `${BASE_URL}/search?q=%40${specificUser}%20in%3Aunseen`; //&page=${lastOffset}
+      const url = `${BASE_URL}/search?q=%40${specificUser}%20in%3Aunseen%20order%3Alatest`; //&page=${lastOffset}
       $.ajax({
         url: url,
         async: false,

@@ -8,6 +8,7 @@
 // @match        https://linux.do/*
 // @match        https://meta.appinn.net/*
 // @match        https://community.openai.com/
+// @match        https://www.uscardforum.com/*
 // @grant        none
 // @license      MIT
 // @icon         https://www.google.com/s2/favicons?domain=linux.do
@@ -24,6 +25,7 @@
     "https://linux.do",
     "https://meta.appinn.net",
     "https://community.openai.com",
+    "https://www.uscardforum.com",
   ];
   const commentLimit = 1000;
   const specificUserPostListLimit = 100;

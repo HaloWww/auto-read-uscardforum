@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Auto Like Specific User base on activity
+// @name         Auto Like Specific User
 // @namespace    http://tampermonkey.net/
 // @version      1.1.2
 // @description  自动点赞特定用户，适用于discourse
@@ -21,17 +21,17 @@
   ("use strict");
   // 定义可能的基本URL
   const possibleBaseURLs = [
+    "https://www.uscardforum.com",
     "https://meta.discourse.org",
     "https://linux.do",
     "https://meta.appinn.net",
     "https://community.openai.com",
-    "https://www.uscardforum.com",
   ];
   const commentLimit = 1000;
   const specificUserPostListLimit = 100;
   const currentURL = window.location.href;
-  let specificUser = localStorage.getItem("specificUser") || "14790897";
-  let likeLimit = parseInt(localStorage.getItem("likeLimit") || 200, 10);
+  let specificUser = localStorage.getItem("specificUser") || "halowang";
+  let likeLimit = 1;
   let BASE_URL = possibleBaseURLs.find((url) => currentURL.startsWith(url));
 
   // 环境变量：阅读网址，如果没有找到匹配的URL，则默认为第一个
@@ -97,12 +97,12 @@
     let isDataSufficient = false;
 
     while (!isDataSufficient) {
-      lastOffset += 20;
-      // lastOffset += 1; //对于page来说
+      //   lastOffset += 20;
+      lastOffset += 1; //对于page来说
       // 举例：https://linux.do/user_actions.json?offset=0&username=14790897&filter=5
-      const url = `${BASE_URL}/user_actions.json?offset=${lastOffset}&username=${specificUser}&filter=5`;
+      //   const url = `${BASE_URL}/user_actions.json?offset=${lastOffset}&username=${specificUser}&filter=5`;
       //举例：https://linux.do/search?q=%4014790897%20in%3Aunseen
-      // const url = `${BASE_URL}/search?q=%40${specificUser}%20in%3Aunseen`; //&page=${lastOffset}
+      const url = `${BASE_URL}/search?q=%40${specificUser}%20in%3Aunseen`; //&page=${lastOffset}
       $.ajax({
         url: url,
         async: false,
@@ -110,10 +110,10 @@
           Accept: "application/json",
         },
         success: function (result) {
-          if (result && result.user_actions && result.user_actions.length > 0) {
-            result.user_actions.forEach((action) => {
-              // if (result && result.posts && result.posts.length > 0) {
-              //   result.posts.forEach((action) => {
+          //   if (result && result.user_actions && result.user_actions.length > 0) {
+          // result.user_actions.forEach((action) => {
+          if (result && result.posts && result.posts.length > 0) {
+            result.posts.forEach((action) => {
               const topicId = action.topic_id;
               //   const postId = action.post_id;
               const postNumber = action.post_number;
@@ -156,6 +156,10 @@
   }
 
   function openSpecificUserPost() {
+    if (localStorage.getItem("read") !== "true") {
+      console.log("read flag is false, aborting navigation");
+      return;
+    }
     let specificUserPostListStr = localStorage.getItem("specificUserPostList");
     let specificUserPostList = specificUserPostListStr
       ? JSON.parse(specificUserPostListStr)
@@ -225,6 +229,10 @@
       reactionButton = document.querySelectorAll(
         ".discourse-reactions-reaction-button"
       )[0];
+    }
+    if (!reactionButton) {
+      console.log("未找到点赞按钮");
+      return;
     }
     if (
       reactionButton.title !== "点赞此帖子" &&
@@ -348,7 +356,7 @@
   likeLimitInput.style.borderRadius = "8px";
   likeLimitInput.style.backgroundColor = "#e0e0e0";
   likeLimitInput.style.width = "100px";
-  likeLimitInput.value = localStorage.getItem("likeLimit") || 200;
+  likeLimitInput.value = 1;
   document.body.appendChild(likeLimitInput);
 
   const saveLikeLimitButton = document.createElement("button");
@@ -365,7 +373,7 @@
   document.body.appendChild(saveLikeLimitButton);
 
   saveLikeLimitButton.onclick = function () {
-    const newLikeLimit = parseInt(likeLimitInput.value.trim(), 10);
+    const newLikeLimit = parseInt(likeLimitInput.value.trim(), 1);
     if (newLikeLimit && newLikeLimit > 0) {
       localStorage.setItem("likeLimit", newLikeLimit);
       likeLimit = newLikeLimit;

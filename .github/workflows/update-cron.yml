@@ -35,7 +35,7 @@ jobs:
 
       - name: replace cron expression
         run: |
-          sed -i "s/cron: '[^']*'/cron: '${{ steps.random.outputs.min }} ${{ steps.random.outputs.hour }} * * *'/" .github/workflows/cron_bypassCF_likeUser.yaml
+          sed -i "s/cron: '[^']*'/cron: '${{ steps.random.outputs.min }} ${{ steps.random.outputs.hour }} * * 6'/" .github/workflows/cron_bypassCF_likeUser.yaml
           sed -i "s/cron: '[^']*'/cron: '${{ steps.random.outputs.min }} ${{ steps.random.outputs.utc_hour }} * * *'/" .github/workflows/cron_bypassCF.yaml
 
       - name: Check PAT

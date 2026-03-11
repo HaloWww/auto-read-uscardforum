@@ -86,6 +86,7 @@ const totalAccounts = usernames.length; // 总的账号数
 const delayBetweenBatches =
   runTimeLimitMillis / Math.ceil(totalAccounts / maxConcurrentAccounts);
 const isLikeSpecificUser = process.env.LIKE_SPECIFIC_USER === "true"; // 只有明确设置为"true"才开启
+console.log("ENV LIKE_SPECIFIC_USER=", process.env.LIKE_SPECIFIC_USER, "=> boolean", isLikeSpecificUser);
 const isAutoLike = process.env.AUTO_LIKE !== "false"; // 默认开启，只有明确设置为"false"才关闭
 const enableRssFetch = process.env.ENABLE_RSS_FETCH === "true"; // 是否开启抓取RSS，只有明确设置为"true"才开启，默认为false
 const enableTopicDataFetch = process.env.ENABLE_TOPIC_DATA_FETCH === "true"; // 是否开启抓取话题数据，只有明确设置为"true"才开启，默认为false
@@ -375,6 +376,7 @@ async function launchBrowserForUser(username, password) {
     // //登录操作
     console.log("登录操作");
     await login(page, username, password);
+    await delayClick(6000);
     // 查找具有类名 "avatar" 的 img 元素验证登录是否成功
     const avatarImg = await page.$("img.avatar");
 
@@ -387,7 +389,7 @@ async function launchBrowserForUser(username, password) {
 
     //真正执行阅读脚本
     let externalScriptPath;
-    if (isLikeSpecificUser === "true") {
+    if (isLikeSpecificUser) {
       const randomChoice = Math.random() < 0.5; // 生成一个随机数，50% 概率为 true
       if (randomChoice) {
         externalScriptPath = path.join(

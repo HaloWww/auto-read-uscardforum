@@ -22,12 +22,12 @@
   ("use strict");
   // 定义可能的基本URL
   const possibleBaseURLs = [
+    "https://www.uscardforum.com/",
     "https://linux.do",
     "https://meta.discourse.org",
     "https://meta.appinn.net",
     "https://community.openai.com",
     "https://idcflare.com/",
-    "https://www.uscardforum.com/",
   ];
   const commentLimit = 2000;
   const topicListLimit = 200;

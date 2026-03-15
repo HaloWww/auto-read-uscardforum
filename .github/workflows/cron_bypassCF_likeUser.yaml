@@ -95,7 +95,7 @@ jobs:
       #   run: LIKE_SPECIFIC_USER=true node bypasscf.js --USERNAMES "$USERNAMES" --PASSWORDS "$PASSWORDS" --WEBSITE "$WEBSITE"
 
       - name: Run a script(windows)
-        run: |
-          $env:LIKE_SPECIFIC_USER="true"
-          node bypasscf.js 
+        run: node bypasscf.js
         shell: pwsh
+        env:
+          LIKE_SPECIFIC_USER: "true"

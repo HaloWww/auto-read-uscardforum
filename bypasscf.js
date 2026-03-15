@@ -305,6 +305,12 @@ async function launchBrowserForUser(username, password) {
     var { connect } = await import("puppeteer-real-browser");
     const { page, browser: newBrowser } = await connect(browserOptions);
     browser = newBrowser; // 将 browser 初始化
+    // 设置浏览器窗口/视口大小（宽度x高度，单位：像素）
+    // 可选分辨率：1920x1080（Full HD）、1366x768（笔记本）、1440x900（MacBook）
+    await page.setViewport({
+      width: 1080,
+      height: 1920
+    });
     // 启动截图功能
     // takeScreenshots(page);
     //登录操作

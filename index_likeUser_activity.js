@@ -70,10 +70,11 @@
       console.log("点赞开始");
       setTimeout(() => {
         likeSpecificPost();
+        // 点赞完成后再调用openSpecificUserPost，这样可以检查read标志
+        if (localStorage.getItem("read") === "true") {
+          openSpecificUserPost();
+        }
       }, 2000);
-      setTimeout(() => {
-        openSpecificUserPost();
-      }, 4000);
     }
   });
   function checkFirstRun() {
@@ -102,7 +103,7 @@
       // 举例：https://linux.do/user_actions.json?offset=0&username=14790897&filter=5
       //   const url = `${BASE_URL}/user_actions.json?offset=${lastOffset}&username=${specificUser}&filter=5`;
       //举例：https://linux.do/search?q=%4014790897%20in%3Aunseen
-      const url = `${BASE_URL}/search?q=%40${specificUser}%20in%3Aunseen%20order%3Alatest`; //&page=${lastOffset}
+      const url = `${BASE_URL}/search?q=%40${specificUser}%20order%3Alatest`; //&page=${lastOffset}
       $.ajax({
         url: url,
         async: false,
@@ -238,27 +239,26 @@
       reactionButton.title !== "点赞此帖子" &&
       reactionButton.title !== "Like this post"
     ) {
-      console.log("已经点赞过");
-      return "already liked";
+      console.log("已经点赞过，直接打开下一个贴子");
+      // 不返回，继续执行后续逻辑自动打开下一个贴子
     } else if (clickCounter >= likeLimit) {
       console.log("已经达到点赞上限");
-      localStorage.setItem("read", false);
+      localStorage.setItem("read", "false");
       return;
-    }
-    triggerClick(reactionButton);
-    clickCounter++;
-    console.log(
-      `Clicked like button ${clickCounter},已点赞用户${specificUser}`
-    );
-    localStorage.setItem("clickCounter", clickCounter.toString());
-    // 如果点击次数达到likeLimit次，则设置点赞变量为false
-    if (clickCounter === likeLimit) {
-      console.log(
-        `Reached ${likeLimit} likes, setting the like variable to false.`
-      );
-      localStorage.setItem("read", false);
     } else {
-      console.log("clickCounter:", clickCounter);
+      triggerClick(reactionButton);
+      clickCounter++;
+      console.log(
+        `Clicked like button ${clickCounter},已点赞用户${specificUser}`
+      );
+      localStorage.setItem("clickCounter", clickCounter.toString());
+      // 如果点击次数达到likeLimit次，则设置点赞变量为false
+      if (clickCounter === likeLimit) {
+        console.log(
+          `Reached ${likeLimit} likes, setting the like variable to false.`
+        );
+        localStorage.setItem("read", "false");
+      }
     }
   }
 
@@ -373,7 +373,7 @@
   document.body.appendChild(saveLikeLimitButton);
 
   saveLikeLimitButton.onclick = function () {
-    const newLikeLimit = parseInt(likeLimitInput.value.trim(), 1);
+    const newLikeLimit = parseInt(likeLimitInput.value.trim(), 3);
     if (newLikeLimit && newLikeLimit > 0) {
       localStorage.setItem("likeLimit", newLikeLimit);
       likeLimit = newLikeLimit;

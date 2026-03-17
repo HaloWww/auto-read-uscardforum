@@ -288,7 +288,7 @@ async function launchBrowserForUser(username, password) {
       const proxyArgs = getPuppeteerProxyArgs(proxyConfig);
       browserOptions.args.push(...proxyArgs);
       console.log(
-        `为用户 ${username} 启用代理: ${proxyConfig.type}://${proxyConfig.host}:${proxyConfig.port}`
+        `为用户 ${username[0] + "***"} 启用代理: ${proxyConfig.type}://${proxyConfig.host}:${proxyConfig.port}`
       );
 
       // 如果有用户名密码，puppeteer-real-browser会自动处理
@@ -636,11 +636,11 @@ async function login(page, username, password, retryCount = 3) {
         alertText.includes("不正确")
       ) {
         throw new Error(
-          `非超时错误，请检查用户名密码是否正确，失败用户 ${username}, 错误信息：${alertText}`
+          `非超时错误，请检查用户名密码是否正确，失败用户 ${username[0] + "***"}, 错误信息：${alertText}`
         );
       } else {
         throw new Error(
-          `非超时错误，也不是密码错误，可能是IP导致，需使用中国美国香港台湾IP，失败用户 ${username}，错误信息：${alertText}`
+          `非超时错误，也不是密码错误，可能是IP导致，需使用中国美国香港台湾IP，失败用户 ${username[0] + "***"}，错误信息：${alertText}`
         );
       }
     } else {
@@ -651,7 +651,7 @@ async function login(page, username, password, retryCount = 3) {
         return await login(page, username, password, retryCount - 1);
       } else {
         throw new Error(
-          `Navigation timed out in login.超时了,可能是IP质量问题,失败用户 ${username}, 
+          `Navigation timed out in login.超时了,可能是IP质量问题,失败用户 ${username[0] + "***"}, 
       ${error}`
         ); //{password}
       }

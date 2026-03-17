@@ -276,7 +276,7 @@ function delayClick(time) {
 async function launchBrowserForUser(username, password) {
   let browser = null; // 在 try 之外声明 browser 变量
   try {
-    console.log("当前用户:", username);
+    console.log("当前用户:", username[0] , "***");
     const browserOptions = {
       headless: "auto",
       args: ["--no-sandbox", "--disable-setuid-sandbox"], // Linux 需要的安全设置

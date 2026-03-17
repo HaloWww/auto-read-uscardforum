@@ -400,7 +400,7 @@ async function launchBrowserForUser(username, password) {
       if (randomChoice) {
         externalScriptPath = path.join(
           dirname(fileURLToPath(import.meta.url)),
-          "index_likeUser_activity.js"
+          "index_likeUser.js"
         );
         console.log("使用index_likeUser_activity");
       } else {

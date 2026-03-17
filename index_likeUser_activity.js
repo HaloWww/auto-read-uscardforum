@@ -97,82 +97,47 @@
     let specificUserPostList = [];
     let isDataSufficient = false;
 
-    const normalizedUser = (specificUser || "").trim();
-    const isNumericUser = /^\d+$/.test(normalizedUser);
-
-    // 对不同站点/账号格式做兼容：
-    // 1) search.json 适用于用户名搜索
-    // 2) user_actions.json 在部分场景下对数字用户更稳定
-    const buildCandidateUrls = (offset) => {
-      const searchUrl = `${BASE_URL}/search.json?q=%40${encodeURIComponent(
-        normalizedUser
-      )}%20order%3Alatest`;
-      const userActionsUrl = `${BASE_URL}/user_actions.json?offset=${offset}&username=${encodeURIComponent(
-        normalizedUser
-      )}&filter=5`;
-      return isNumericUser ? [userActionsUrl, searchUrl] : [searchUrl, userActionsUrl];
-    };
-
     while (!isDataSufficient) {
-      lastOffset += 1; // page offset
-      const candidateUrls = buildCandidateUrls(lastOffset);
-      let hasDataInCurrentOffset = false;
-
-      for (const url of candidateUrls) {
-        $.ajax({
-          url,
-          async: false,
-          headers: {
-            Accept: "application/json",
-          },
-          success: function (result) {
-            if (result && result.posts && result.posts.length > 0) {
-              result.posts.forEach((action) => {
-                const topicId = action.topic_id;
-                const postNumber = action.post_number;
-                if (topicId && postNumber) {
-                  specificUserPostList.push({
-                    topic_id: topicId,
-                    post_number: postNumber,
-                  });
-                }
+      //   lastOffset += 20;
+      lastOffset += 1; //对于page来说
+      // 举例：https://linux.do/user_actions.json?offset=0&username=14790897&filter=5
+      //   const url = `${BASE_URL}/user_actions.json?offset=${lastOffset}&username=${specificUser}&filter=5`;
+      //举例：https://linux.do/search?q=%4014790897%20in%3Aunseen
+      const url = `${BASE_URL}/search?q=%40${specificUser}%20order%3Alatest`; //&page=${lastOffset}
+      $.ajax({
+        url: url,
+        async: false,
+        headers: {
+          Accept: "application/json",
+        },
+        success: function (result) {
+          //   if (result && result.user_actions && result.user_actions.length > 0) {
+          // result.user_actions.forEach((action) => {
+          if (result && result.posts && result.posts.length > 0) {
+            result.posts.forEach((action) => {
+              const topicId = action.topic_id;
+              //   const postId = action.post_id;
+              const postNumber = action.post_number;
+              specificUserPostList.push({
+                topic_id: topicId,
+                // post_id: postId,
+                post_number: postNumber,
               });
-              hasDataInCurrentOffset = true;
-              return;
+            });
+
+            // 检查是否已获得足够的 Posts
+            if (specificUserPostList.length >= specificUserPostListLimit) {
+              isDataSufficient = true;
             }
-
-            if (result && result.user_actions && result.user_actions.length > 0) {
-              result.user_actions.forEach((action) => {
-                const topicId = action.topic_id;
-                const postNumber = action.post_number;
-                if (topicId && postNumber) {
-                  specificUserPostList.push({
-                    topic_id: topicId,
-                    post_number: postNumber,
-                  });
-                }
-              });
-              hasDataInCurrentOffset = true;
-            }
-          },
-          error: function (XMLHttpRequest, textStatus, errorThrown) {
-            console.error("获取帖子列表失败:", url, textStatus, errorThrown);
-          },
-        });
-
-        if (hasDataInCurrentOffset) {
-          break;
-        }
-      }
-
-      // 当前 offset 两个接口都没有数据时停止请求
-      if (!hasDataInCurrentOffset) {
-        isDataSufficient = true;
-      }
-
-      if (specificUserPostList.length >= specificUserPostListLimit) {
-        isDataSufficient = true;
-      }
+          } else {
+            isDataSufficient = true; // 没有更多内容时停止请求
+          }
+        },
+        error: function (XMLHttpRequest, textStatus, errorThrown) {
+          console.error(XMLHttpRequest, textStatus, errorThrown);
+          isDataSufficient = true; // 遇到错误时也停止请求
+        },
+      });
     }
 
     // 如果列表超出限制，则截断
@@ -183,20 +148,12 @@
       );
     }
 
-    // 去重，避免不同接口返回重复帖子
-    const deduped = [];
-    const seen = new Set();
-    for (const item of specificUserPostList) {
-      const key = `${item.topic_id}-${item.post_number}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        deduped.push(item);
-      }
-    }
-
     // 存储 lastOffset 和 specificUserPostList 到 localStorage
     localStorage.setItem("lastOffset", lastOffset);
-    localStorage.setItem("specificUserPostList", JSON.stringify(deduped));
+    localStorage.setItem(
+      "specificUserPostList",
+      JSON.stringify(specificUserPostList)
+    );
   }
 
   function openSpecificUserPost() {
@@ -416,7 +373,7 @@
   document.body.appendChild(saveLikeLimitButton);
 
   saveLikeLimitButton.onclick = function () {
-    const newLikeLimit = parseInt(likeLimitInput.value.trim(), 10);
+    const newLikeLimit = parseInt(likeLimitInput.value.trim(), 3);
     if (newLikeLimit && newLikeLimit > 0) {
       localStorage.setItem("likeLimit", newLikeLimit);
       likeLimit = newLikeLimit;

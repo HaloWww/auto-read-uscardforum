@@ -1,102 +1,46 @@
-name: likeUser (点赞特定用户)
-# GitHub.secrets优先级最高，即使没有设置对应的变量，它也会读取，这时变量为空值，导致报错，.env读取的变量无法覆盖这个值,使用了${PASSWORD_ESCAPED//\#/\\#}来对#转义,需要两个\，但是我直接在env文件使用这种方法是不行的，GitHub action是有效
+name: likeUser
+
 on:
   schedule:
-    # 每天 UTC 时间 18:00 运行
-    - cron: '52 21 * * 6'
-  workflow_dispatch: # 允许手动触发
+    - cron: '52 13 * * 6'
+  workflow_dispatch:
+    inputs:
+      login_only:
+        description: '仅验证全部账号登录'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  run:
     runs-on: windows-latest
-    timeout-minutes: 60 # 设置作业超时时间为20分钟
-
-    strategy:
-      matrix:
-        node-version: [20.x]
+    timeout-minutes: 60
     env:
-      # 在作业级别设置环境变量
       USERNAMES: ${{ secrets.USERNAMES }}
       PASSWORDS: ${{ secrets.PASSWORDS }}
-      RUN_TIME_LIMIT_MINUTES: "20"
-      WEBSITE: ${{ secrets.WEBSITE }}
-#      RUN_TIME_LIMIT_MINUTES: ${{ secrets.RUN_TIME_LIMIT_MINUTES }}
-      MAX_CONCURRENT_ACCOUNTS: ${{ secrets.MAX_CONCURRENT_ACCOUNTS }}
+      WEBSITE: ${{ secrets.WEBSITE || 'https://www.uscardforum.com' }}
+      RUN_TIME_LIMIT_MINUTES: '20'
+      MAX_CONCURRENT_ACCOUNTS: ${{ secrets.MAX_CONCURRENT_ACCOUNTS || '3' }}
+      NAV_TIMEOUT_MS: ${{ secrets.NAV_TIMEOUT_MS || '60000' }}
+      LOGIN_ONLY: ${{ inputs.login_only || false }}
+      LIKE_SPECIFIC_USER: 'true'
+      SPECIFIC_USER: ${{ secrets.SPECIFIC_USER || 'halowang' }}
+      AUTO_LIKE: ${{ secrets.AUTO_LIKE || 'true' }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
-      SPECIFIC_USER: ${{ secrets.SPECIFIC_USER }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      LIKE_SPECIFIC_USER: ${{ secrets.LIKE_SPECIFIC_USER }}
-      ENABLE_RSS_FETCH: ${{ secrets.ENABLE_RSS_FETCH || '' }}
-      ENABLE_TOPIC_DATA_FETCH: ${{ secrets.ENABLE_TOPIC_DATA_FETCH || '' }}
-      HEALTH_PORT: ${{ secrets.HEALTH_PORT }}
-      # 代理配置
       PROXY_URL: ${{ secrets.PROXY_URL }}
       PROXY_TYPE: ${{ secrets.PROXY_TYPE }}
       PROXY_HOST: ${{ secrets.PROXY_HOST }}
       PROXY_PORT: ${{ secrets.PROXY_PORT }}
       PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
       PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
-      # 数据库配置
-      POSTGRES_URI: ${{ secrets.POSTGRES_URI }}
-      COCKROACH_URI: ${{ secrets.COCKROACH_URI }}
-      NEON_URI: ${{ secrets.NEON_URI }}
-      AIVEN_MYSQL_URI: ${{ secrets.AIVEN_MYSQL_URI }}
-      MONGO_URI: ${{ secrets.MONGO_URI }}
     steps:
-      - uses: actions/checkout@v3 # 检出仓库
-
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
-
-      - name: Cache node modules
-        uses: actions/cache@v3
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-
-      - name: Install dependencies
-        run: |
-          npm install
-      #github action设置的action环境变量会完全替换掉env文件的读取，所以需要在action里手动进行加载env文件
-      # - name: Load environment variables
-      #   run: |
-      #     echo "Debug: Checking if .env file exists..."
-
-      #     # 检查 .env 文件是否存在
-      #     if [ -f .env ]; then
-      #       echo ".env file found. Loading environment variables from .env file"
-            
-      #       # 加载 .env 文件中的默认值
-      #       set -a
-      #       source .env
-      #       set +a
-            
-      #       echo "Loaded .env variables:"
-      #     else
-      #       echo ".env file not found. Skipping loading."
-      #     fi
-
-
-      #     if [ -n "${{ secrets.WEBSITE }}" ] && [ ! -z "${{ secrets.WEBSITE }}" ]; then
-      #       echo "Using GitHub Secret for WEBSITE"
-      #       echo "WEBSITE=${{ secrets.WEBSITE }}" >> $GITHUB_ENV
-      #     else
-      #       echo "WEBSITE=${WEBSITE}" >> $GITHUB_ENV
-      #     fi
-
-      #   shell: bash
-
-      # - name: Run a script(linux)
-      #   run: LIKE_SPECIFIC_USER=true node bypasscf.js --USERNAMES "$USERNAMES" --PASSWORDS "$PASSWORDS" --WEBSITE "$WEBSITE"
-
-      - name: Run a script(windows)
-        run: node bypasscf.js
-        shell: pwsh
-        env:
-          LIKE_SPECIFIC_USER: "true"
+          node-version: '20'
+          cache: npm
+      - run: npm ci --omit=dev
+      - run: npm start

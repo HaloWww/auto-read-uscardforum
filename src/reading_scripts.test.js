@@ -3,20 +3,22 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const scripts = ["index.js", "index_likeUser.js", "index_likeUser_activity.js"];
+const scripts = ["index.js", "index_likeUser.js"];
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-// Execute each complete userscript with a browser-like document and a controlled clock.
+// Execute each injected script with a browser-like document and a controlled clock.
 // No forum account, navigation, or external network access is needed for these cases.
-function browser(script, { readyState = "complete", reading = true, fetch, storage, querySelectorAll } = {}) {
+function browser(script, {
+  readyState = "complete", reading = true, fetch, storage, querySelectorAll, random,
+  url = "https://www.uscardforum.com/t/topic/438315/1",
+} = {}) {
   let now = 0;
   let nextTimer = 0;
   const timers = new Map();
   const errors = [];
-  const controls = [];
   const requests = [];
   const values = new Map(Object.entries({
-    isFirstRun: "false", read: String(reading), autoLikeEnabled: "false",
+    read: String(reading), autoLikeEnabled: "false",
   }));
   const localStorage = storage || {
     getItem: (key) => values.get(key) ?? null,
@@ -39,15 +41,15 @@ function browser(script, { readyState = "complete", reading = true, fetch, stora
       listeners,
     };
   };
-  const body = { offsetHeight: 100, appendChild: (element) => controls.push(element) };
+  const body = { offsetHeight: 100 };
   const document = {
     ...eventTarget(), readyState, body: readyState === "loading" ? null : body,
-    createElement: () => ({ ...eventTarget(), style: {} }),
     querySelectorAll: querySelectorAll || (() => []),
   };
-  const initialUrl = "https://www.uscardforum.com/t/topic/438315/1";
+  const initialUrl = url;
+  const location = new URL(url);
   const window = {
-    ...eventTarget(), location: { href: initialUrl, pathname: "/t/topic/438315/1" },
+    ...eventTarget(), location: { href: initialUrl, pathname: location.pathname, origin: location.origin },
     innerHeight: 800, scrollY: 0, scrollBy() {},
   };
   const setTimeout = (callback, delay = 0) => {
@@ -60,6 +62,7 @@ function browser(script, { readyState = "complete", reading = true, fetch, stora
   }
   const context = vm.createContext({
     window, document, localStorage, Date: ClockDate, AbortController,
+    Math: random ? Object.assign(Object.create(Math), { random }) : Math,
     MouseEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
     console: { log() {}, warn() {}, error() {} },
     setTimeout, clearTimeout: (id) => timers.delete(id),
@@ -89,7 +92,7 @@ function browser(script, { readyState = "complete", reading = true, fetch, stora
     throw new Error("Timer loop failed to yield");
   };
   return {
-    inject, advance, controls, requests, localStorage, window, document, errors,
+    inject, advance, requests, localStorage, window, document, errors,
     get now() { return now; },
     finishLoading() {
       document.body = body;
@@ -114,16 +117,16 @@ const topics = { topic_list: { topics: [{ id: 123, posts_count: 5 }] } };
 
 for (const script of scripts) {
   test(`${script}: early and duplicate injection initializes once when the body exists`, async () => {
-    const page = browser(script, { readyState: "loading", reading: false });
+    const page = browser(script, { readyState: "loading" });
     page.inject();
     page.inject();
-    assert.equal(page.controls.length, 0);
+    assert.equal(page.requests.length, 0);
+    assert.equal(page.window.__autoInjected, true);
     assert.equal(page.document.listeners.get("DOMContentLoaded").length, 1);
     page.finishLoading();
     page.inject();
-    await page.advance(10000);
-    assert.equal(page.controls.length, script === "index.js" ? 2 : 6);
-    assert.equal(page.requests.length, 0);
+    await page.advance(2000);
+    assert.equal(page.requests.length, 1);
     assert.deepEqual(page.errors, []);
   });
 
@@ -217,6 +220,7 @@ for (const script of scripts) {
 
 test("latest topics: filtered pages yield between requests and stop at the page limit", async () => {
   const page = browser("index.js", {
+    url: "https://forum.example/t/topic/1",
     fetch: (url) => {
       const id = Number(new URL(url).searchParams.get("page")) + 1;
       return response({ topic_list: { topics: [{ id, posts_count: 9999 }] } });
@@ -227,8 +231,32 @@ test("latest topics: filtered pages yield between requests and stop at the page 
   assert.equal(page.requests.length, 1);
   await page.advance(10000);
   assert.equal(page.requests.length, 10);
+  assert.ok(page.requests.every((url) => new URL(url).origin === "https://forum.example"));
   assert.equal(page.window.location.href, page.initialUrl);
   assert.deepEqual(page.errors, []);
+});
+
+test("random likes: queued cancellation and the daily limit keep reading enabled", async () => {
+  let clicks = 0;
+  const buttons = Array.from({ length: 20 }, () => ({ title: "Like this post", dispatchEvent: () => clicks++ }));
+  const page = browser("index.js", { querySelectorAll: () => buttons, random: () => 0 });
+  page.localStorage.setItem("autoLikeEnabled", "true");
+  page.inject();
+  page.localStorage.setItem("autoLikeEnabled", "false");
+  await page.advance(20000);
+  assert.equal(clicks, 0);
+  assert.equal(page.localStorage.getItem("read"), "true");
+  assert.deepEqual(page.errors, []);
+
+  const enabledPage = browser("index.js", { querySelectorAll: () => buttons, random: () => 0 });
+  enabledPage.localStorage.setItem("autoLikeEnabled", "true");
+  enabledPage.inject();
+  await enabledPage.advance(40000);
+  assert.equal(clicks, 9);
+  assert.equal(enabledPage.localStorage.getItem("clickCounter"), "9");
+  assert.equal(enabledPage.localStorage.getItem("autoLikeEnabled"), "false");
+  assert.equal(enabledPage.localStorage.getItem("read"), "true");
+  assert.deepEqual(enabledPage.errors, []);
 });
 
 for (const script of scripts.slice(1)) {
@@ -308,12 +336,15 @@ for (const script of scripts.slice(1)) {
   });
 
   test(`${script}: repeated search pages stop and never duplicate queued posts`, async () => {
-    const page = browser(script, { fetch: () => response(posts) });
+    const page = browser(script, {
+      url: "https://forum.example/t/topic/1", fetch: () => response(posts),
+    });
     page.inject();
     await page.advance(10000);
     assert.equal(page.requests.length, 2);
     assert.deepEqual(page.requests.map((url) => new URL(url).searchParams.get("page")), ["1", "2"]);
-    assert.equal(page.window.location.href, "https://www.uscardforum.com/t/topic/123/4");
+    assert.equal(page.window.location.href, "https://forum.example/t/topic/123/4");
+    assert.ok(page.requests.every((url) => new URL(url).origin === "https://forum.example"));
     assert.equal(page.localStorage.getItem("specificUserPostList"), "[]");
     assert.deepEqual(page.errors, []);
   });

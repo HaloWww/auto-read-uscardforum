@@ -2,52 +2,47 @@ name: Update Workflow Cron
 
 on:
   schedule:
-    - cron: '0 16 * * 1-5' 
-  workflow_dispatch: # 允许手动触发
-#   push:
-#     branches:
-#       - main
-env:
-  PAT_TOKEN: ${{ secrets.PAT_TOKEN }} # Workflows Update GitHub Action workflow files. Learn more.  read and write access to the repository contents.  classic s
+    - cron: '0 16 * * 1-5'
+  workflow_dispatch:
+
 permissions:
-  contents: write  
-  actions: write
+  contents: write
 
 jobs:
-  update-cron:
+  update:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-            token: ${{ secrets.PAT_TOKEN }}
-        # formula: RANDOM_NUM=$((RANDOM % (B - A + 1) + A))
-      - name: generate random time
-        id: random
+          token: ${{ secrets.PAT_TOKEN }}
+      - name: Randomize schedules (07:00–23:59 Asia/Shanghai)
+        shell: bash
         run: |
-          HOUR=$((RANDOM % 17 + 7))
-          MIN=$((RANDOM % 60))
-          UTC_HOUR=$(( (HOUR + 24 - 8) % 24 ))
-          echo "hour=$HOUR" >> $GITHUB_OUTPUT
-          echo "min=$MIN" >> $GITHUB_OUTPUT
-          echo "utc_hour=$UTC_HOUR" >> $GITHUB_OUTPUT
-          echo "北京时间 $HOUR:$MIN, UTC 时间 $UTC_HOUR:$MIN"
-
-      - name: replace cron expression
+          node --input-type=module <<'JS'
+          import { randomInt } from 'node:crypto';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const hour = randomInt(7, 24);
+          const minute = randomInt(0, 60);
+          const utcHour = (hour + 16) % 24;
+          const saturdayUtcDay = hour < 8 ? 5 : 6;
+          for (const [file, day] of [
+            ['cron_bypassCF.yaml', '*'],
+            ['cron_bypassCF_likeUser.yaml', String(saturdayUtcDay)],
+          ]) {
+            const path = `.github/workflows/${file}`;
+            const source = readFileSync(path, 'utf8');
+            const pattern = /cron: ['"][^'"]+['"]/g;
+            if ([...source.matchAll(pattern)].length !== 1) throw new Error(`Unexpected schedule in ${file}`);
+            writeFileSync(path, source.replace(pattern, `cron: '${minute} ${utcHour} * * ${day}'`));
+          }
+          console.log(`北京时间 ${hour}:${String(minute).padStart(2, '0')}`);
+          JS
+      - name: Commit schedules
         run: |
-          sed -i "s/cron: '[^']*'/cron: '${{ steps.random.outputs.min }} ${{ steps.random.outputs.hour }} * * 6'/" .github/workflows/cron_bypassCF_likeUser.yaml
-          sed -i "s/cron: '[^']*'/cron: '${{ steps.random.outputs.min }} ${{ steps.random.outputs.utc_hour }} * * *'/" .github/workflows/cron_bypassCF.yaml
-
-      - name: Check PAT
-        run: |
-            echo "PAT_TOKEN starts with: ${PAT_TOKEN:0:5}"
-
-      - name: commit and push changes
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git diff --cached --quiet || git commit -m "update cron ${{ steps.random.outputs.min }} ${{ steps.random.outputs.hour }} * * *"
-          git push "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
-
-       
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/cron_bypassCF.yaml .github/workflows/cron_bypassCF_likeUser.yaml
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Randomize reading schedules'
+          git push

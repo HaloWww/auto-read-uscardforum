@@ -9,6 +9,10 @@ on:
         description: '仅验证全部账号登录'
         type: boolean
         default: false
+      verify_reading:
+        description: '验证登录及阅读初始化，不点赞或发送通知'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,6 +29,7 @@ jobs:
       MAX_CONCURRENT_ACCOUNTS: ${{ secrets.MAX_CONCURRENT_ACCOUNTS || '3' }}
       NAV_TIMEOUT_MS: ${{ secrets.NAV_TIMEOUT_MS || '60000' }}
       LOGIN_ONLY: ${{ inputs.login_only || false }}
+      VERIFY_READING: ${{ inputs.verify_reading || false }}
       LIKE_SPECIFIC_USER: 'true'
       SPECIFIC_USER: ${{ secrets.SPECIFIC_USER || 'halowang' }}
       AUTO_LIKE: ${{ secrets.AUTO_LIKE || 'true' }}

@@ -1,4 +1,7 @@
 import fs from "fs";
+import { parseAccounts, positiveInteger } from "./src/accounts.js";
+import { loginDiscourse } from "./src/discourse_login.js";
+import { runAccountBatches } from "./src/account_runner.js";
 import path from "path";
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
@@ -10,6 +13,7 @@ import fetch from "node-fetch";
 import { parseStringPromise } from "xml2js";
 import { parseRss } from "./src/parse_rss.js";
 import { processAndSaveTopicData } from "./src/topic_data.js";
+import { closeAllConnections } from "./src/db.js";
 import {
   getProxyConfig,
   getPuppeteerProxyArgs,
@@ -19,8 +23,9 @@ import {
 
 dotenv.config();
 
-// 捕获未处理的异常/Promise拒绝，避免因 Target closed 之类错误导致进程退出
+// Keep diagnostics while ensuring a runtime failure cannot turn Actions green.
 process.on("unhandledRejection", (reason) => {
+  process.exitCode = 1;
   try {
     const msg = (reason && reason.message) ? reason.message : String(reason);
     console.warn("[unhandledRejection]", msg);
@@ -29,6 +34,7 @@ process.on("unhandledRejection", (reason) => {
   }
 });
 process.on("uncaughtException", (err) => {
+  process.exitCode = 1;
   try {
     const msg = (err && err.message) ? err.message : String(err);
     console.warn("[uncaughtException]", msg);
@@ -58,7 +64,7 @@ if (fs.existsSync(".env.local")) {
 }
 
 // 读取以分钟为单位的运行时间限制
-const runTimeLimitMinutes = process.env.RUN_TIME_LIMIT_MINUTES || 20;
+const runTimeLimitMinutes = positiveInteger(process.env.RUN_TIME_LIMIT_MINUTES, 20, "RUN_TIME_LIMIT_MINUTES");
 
 // 将分钟转换为毫秒
 const runTimeLimitMillis = runTimeLimitMinutes * 60 * 1000;
@@ -67,24 +73,71 @@ console.log(
   `运行时间限制为：${runTimeLimitMinutes} 分钟 (${runTimeLimitMillis} 毫秒)`
 );
 
-// 设置一个定时器，在运行时间到达时终止进程
-const shutdownTimer = setTimeout(() => {
-  console.log("时间到,Reached time limit, shutting down the process...");
-  process.exit(0); // 退出进程
-}, runTimeLimitMillis);
-
-const token = process.env.TELEGRAM_BOT_TOKEN;
+const loginOnly = process.env.LOGIN_ONLY === "true";
+const token = loginOnly ? undefined : process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
 const groupId = process.env.TELEGRAM_GROUP_ID;
 const specificUser = process.env.SPECIFIC_USER || "halowang";
-const maxConcurrentAccounts = parseInt(process.env.MAX_CONCURRENT_ACCOUNTS) || 3; // 每批最多同时运行的账号数
-const usernames = process.env.USERNAMES.split(",");
-const passwords = process.env.PASSWORDS.split(",");
-const loginUrl = process.env.WEBSITE || "https://linux.do"; //在GitHub action环境里它不能读取默认环境变量,只能在这里设置默认值
-const delayBetweenInstances = 10000;
-const totalAccounts = usernames.length; // 总的账号数
-const delayBetweenBatches =
-  runTimeLimitMillis / Math.ceil(totalAccounts / maxConcurrentAccounts);
+const accounts = parseAccounts(process.env.USERNAMES, process.env.PASSWORDS);
+const maxConcurrentAccounts = positiveInteger(process.env.MAX_CONCURRENT_ACCOUNTS, 3, "MAX_CONCURRENT_ACCOUNTS");
+const loginUrl = (process.env.WEBSITE || "https://linux.do").replace(/\/+$/, "");
+const navigationTimeout = positiveInteger(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT, 60000, "NAV_TIMEOUT_MS");
+const activeBrowsers = new Set();
+const runtimeErrors = new Map();
+let failedAccounts = 0;
+let shutdownTimer;
+
+async function closeBrowser(browser) {
+  if (!browser) return;
+  activeBrowsers.delete(browser);
+  let timer;
+  try {
+    await Promise.race([
+      browser.close(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("关闭浏览器超时，断开连接以清理进程")), 10000);
+      }),
+    ]);
+  } catch (error) {
+    // puppeteer-real-browser's disconnected handler terminates its own Chrome
+    // process tree. This also works when a renderer no longer answers CDP.
+    browser.disconnect();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runAccounts() {
+  try {
+    const results = await runAccountBatches(accounts, {
+      maxConcurrentAccounts,
+      runTimeMillis: runTimeLimitMillis,
+      keepAlive: !loginOnly,
+      launch: (account, index) => launchBrowserForUser(account.username, account.password, index),
+      close: ({ browser }) => closeBrowser(browser),
+      onBatch: ({ startIndex, endIndex }) =>
+        console.log(`当前批次：${startIndex + 1} - ${endIndex}`),
+    });
+    for (const result of results) {
+      const runtimeError = runtimeErrors.get(result.value?.browser);
+      if (!result.success || result.closeError || runtimeError) {
+        failedAccounts++;
+        console.error(`账号 #${result.index + 1} 失败：${(result.error || result.closeError || runtimeError).message}`);
+      }
+    }
+    console.log(`账号任务完成：${results.length - failedAccounts} 成功，${failedAccounts} 失败`);
+    if (failedAccounts) process.exitCode = 1;
+  } catch (error) {
+    console.error("账号任务失败：", error.message);
+    process.exitCode = 1;
+  } finally {
+    await Promise.allSettled([...activeBrowsers].map(closeBrowser));
+    if (enableTopicDataFetch && !loginOnly) await closeAllConnections();
+    healthServer.close();
+    clearTimeout(shutdownTimer);
+  }
+}
 const isLikeSpecificUser = process.env.LIKE_SPECIFIC_USER === "true"; // 只有明确设置为"true"才开启
 console.log("ENV LIKE_SPECIFIC_USER=", process.env.LIKE_SPECIFIC_USER, "=> boolean", isLikeSpecificUser);
 const isAutoLike = process.env.AUTO_LIKE !== "false"; // 默认开启，只有明确设置为"false"才关闭
@@ -208,77 +261,14 @@ function delayClick(time) {
   });
 }
 
-(async () => {
-  try {
-    if (usernames.length !== passwords.length) {
-      console.log(usernames.length, passwords.length);
-      throw new Error("用户名和密码的数量不匹配！");
-    }
-
-    // 并发启动浏览器实例进行登录
-    const loginTasks = usernames.map((username, index) => {
-      const password = passwords[index];
-      const delay = (index % maxConcurrentAccounts) * delayBetweenInstances; // 使得每一组内的浏览器可以分开启动
-      return () => {
-        // 确保这里返回的是函数
-        return new Promise((resolve, reject) => {
-          setTimeout(() => {
-            launchBrowserForUser(username, password)
-              .then(resolve)
-              .catch(reject);
-          }, delay);
-        });
-      };
-    });
-    // 依次执行每个批次的任务
-    for (let i = 0; i < totalAccounts; i += maxConcurrentAccounts) {
-      console.log(`当前批次：${i + 1} - ${i + maxConcurrentAccounts}`);
-      // 执行每批次最多 4 个账号
-      const batch = loginTasks
-        .slice(i, i + maxConcurrentAccounts)
-        .map(async (task) => {
-          const { browser } = await task(); // 运行任务并获取浏览器实例
-          return browser;
-        }); // 等待当前批次的任务完成
-      const browsers = await Promise.all(batch); // Task里面的任务本身是没有进行await的, 所以会继续执行下面的代码
-
-      // 如果还有下一个批次，等待指定的时间,同时，如果总共只有一个账号，也需要继续运行
-      if (i + maxConcurrentAccounts < totalAccounts || i === 0) {
-        console.log(`等待 ${delayBetweenBatches / 1000} 秒`);
-        await new Promise((resolve) =>
-          setTimeout(resolve, delayBetweenBatches)
-        );
-      } else {
-        console.log("没有下一个批次，即将结束");
-      }
-      console.log(
-        `批次 ${
-          Math.floor(i / maxConcurrentAccounts) + 1
-        } 完成，关闭浏览器...,浏览器对象：${browsers}`
-      );
-      // 关闭所有浏览器实例
-      for (const browser of browsers) {
-        await browser.close();
-      }
-    }
-
-    console.log("所有账号登录操作已完成");
-    // 等待所有登录操作完成
-    // await Promise.all(loginTasks);
-  } catch (error) {
-    // 错误处理逻辑
-    console.error("发生错误：", error);
-    if (token && chatId) {
-      sendToTelegram(`${error.message}`);
-    }
-  }
-})();
-async function launchBrowserForUser(username, password) {
+async function launchBrowserForUser(username, password, accountIndex) {
+  const label = `账号 #${accountIndex + 1} (${username[0]}***)`;
   let browser = null; // 在 try 之外声明 browser 变量
   try {
-    console.log("当前用户:", username[0] , "***");
+    console.log(`${label}：启动浏览器`);
     const browserOptions = {
       headless: "auto",
+      connectOption: { protocolTimeout: navigationTimeout },
       args: ["--no-sandbox", "--disable-setuid-sandbox"], // Linux 需要的安全设置
     };
 
@@ -304,7 +294,15 @@ async function launchBrowserForUser(username, password) {
 
     var { connect } = await import("puppeteer-real-browser");
     const { page, browser: newBrowser } = await connect(browserOptions);
-    browser = newBrowser; // 将 browser 初始化
+    browser = newBrowser;
+    activeBrowsers.add(browser);
+    browser.on("disconnected", () => {
+      if (activeBrowsers.has(browser)) runtimeErrors.set(browser, new Error("浏览器意外断开连接"));
+    });
+    page.on("error", (error) => {
+      runtimeErrors.set(browser, error);
+      console.error(`${label} 浏览器错误：${error.message}`);
+    });
     // 设置浏览器窗口/视口大小（宽度x高度，单位：像素）
     // 可选分辨率：1920x1080（Full HD）、1366x768（笔记本）、1440x900（MacBook）
     // await page.setViewport({
@@ -314,7 +312,7 @@ async function launchBrowserForUser(username, password) {
     // 启动截图功能
     // takeScreenshots(page);
     //登录操作
-    await navigatePage(loginUrl, page, browser);
+    await navigatePage(loginUrl, page);
     await delayClick(8000);
     // 设置额外的 headers
     await page.setExtraHTTPHeaders({
@@ -327,71 +325,30 @@ async function launchBrowserForUser(username, password) {
 
     // console.log("navigator.webdriver is :", isWebDriverUndefined); // 输出应为 false
     page.on("pageerror", (error) => {
-      console.error(`Page error: ${error.message}`);
+      console.error(`${label} 页面错误：${error.message}`);
     });
-    page.on("error", async (error) => {
-      // console.error(`Error: ${error.message}`);
-      // 检查是否是 localStorage 的访问权限错误
-      if (
-        error.message.includes(
-          "Failed to read the 'localStorage' property from 'Window'"
-        )
-      ) {
-        console.log("Trying to refresh the page to resolve the issue...");
-        await page.reload(); // 刷新页面
-        // 重新尝试你的操作...
-      }
+    // Observe real HTTP responses, not console strings. A rate limit stops
+    // likes in the existing document and each later document; do this once.
+    let rateLimited = false;
+    page.on("response", (response) => {
+      if (rateLimited || response.status() !== 429 ||
+          new URL(response.url()).origin !== new URL(loginUrl).origin) return;
+      rateLimited = true;
+      console.warn(`${label}：网站返回 429，暂停自动点赞`);
+      const disableLikes = () => localStorage.setItem("autoLikeEnabled", "false");
+      void (async () => {
+        await page.evaluateOnNewDocument(disableLikes);
+        if (!page.isClosed()) await page.evaluate(disableLikes);
+      })().catch((error) => console.warn(`${label}：暂停点赞失败：${error.message}`));
     });
-    page.on("console", async (msg) => {
-      // console.log("PAGE LOG:", msg.text());
-      // 使用一个标志变量来检测是否已经刷新过页面
-      if (
-        !page._isReloaded &&
-        msg.text().includes("the server responded with a status of 429")
-      ) {
-        // 设置标志变量为 true，表示即将刷新页面
-        page._isReloaded = true;
-        //由于油候脚本它这个时候可能会导航到新的网页,会导致直接执行代码报错,所以使用这个来在每个新网页加载之前来执行
-        try {
-          await page.evaluateOnNewDocument(() => {
-            localStorage.setItem("autoLikeEnabled", "false");
-          });
-        } catch (e) {
-          // Fallback to immediate evaluate when target already navigated/closed
-          try {
-            if (!page.isClosed || !page.isClosed()) {
-              await page.evaluate(() => {
-                localStorage.setItem("autoLikeEnabled", "false");
-              });
-            }
-          } catch (e2) {
-            console.warn(
-              `Skip disabling autoLike due to closed target: ${
-                (e2 && e2.message) ? e2.message : e2
-              }`
-            );
-          }
-        }
-        // 等待一段时间，比如 3 秒
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        console.log("Retrying now...");
-        // 尝试刷新页面
-        // await page.reload();
-      }
+    console.log(`${label}：登录操作`);
+    await loginDiscourse(page, username, password, {
+      timeout: navigationTimeout,
+      onRetry: (attempt, error) =>
+        console.warn(`${label}：登录暂时失败，重试 ${attempt}/2：${error.message}`),
     });
-    // //登录操作
-    console.log("登录操作");
-    await login(page, username, password);
-    await delayClick(6000);
-    // 查找具有类名 "avatar" 的 img 元素验证登录是否成功
-    const avatarImg = await page.$("img.avatar");
-
-    if (avatarImg) {
-      console.log("找到avatarImg，登录成功");
-    } else {
-      console.log("未找到avatarImg，登录失败");
-      throw new Error("登录失败");
-    }
+    console.log(`${label}：已验证当前用户菜单，登录成功`);
+    if (loginOnly) return { browser };
 
     //真正执行阅读脚本
     let externalScriptPath;
@@ -422,6 +379,7 @@ async function launchBrowserForUser(username, password) {
     await page.evaluateOnNewDocument(
       (...args) => {
         const [specificUser, scriptToEval, isAutoLike] = args;
+        if (window.__autoInjected) return;
         localStorage.setItem("read", true);
         localStorage.setItem("specificUser", specificUser);
         localStorage.setItem("isFirstRun", "false");
@@ -431,7 +389,7 @@ async function launchBrowserForUser(username, password) {
       },
       specificUser,
       externalScript,
-      isAutoLike
+      isAutoLike && !rateLimited
     ); //变量必须从外部显示的传入, 因为在浏览器上下文它是读取不了的
     // 添加一个监听器来监听每次页面加载完成的事件
     page.on("load", async () => {
@@ -441,22 +399,22 @@ async function launchBrowserForUser(username, password) {
     if (loginUrl == "https://linux.do") {
       await page.goto("https://linux.do/t/topic/13716/790", {
         waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
+        timeout: navigationTimeout,
       });
     } else if (loginUrl == "https://meta.appinn.net") {
       await page.goto("https://meta.appinn.net/t/topic/52006", {
         waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
+        timeout: navigationTimeout,
       });
     } else if (loginUrl == "https://www.uscardforum.com") {
       await page.goto("https://www.uscardforum.com/t/topic/438315/1", {
         waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
+        timeout: navigationTimeout,
       });
     } else {
       await page.goto(`${loginUrl}/t/topic/1`, {
         waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
+        timeout: navigationTimeout,
       });
     }
     // Ensure automation injected after navigation (fallback in case init-script failed)
@@ -469,18 +427,17 @@ async function launchBrowserForUser(username, password) {
             localStorage.setItem("isFirstRun", "false");
             localStorage.setItem("autoLikeEnabled", isAutoLike);
             try { eval(scriptToEval); } catch (e) { console.error("eval external script failed", e); }
-            window.__autoInjected = true;
           }
         },
         specificUser,
         externalScript,
-        isAutoLike
+        isAutoLike && !rateLimited
       );
     } catch (e) {
       console.warn(`Post-navigation inject failed: ${e && e.message ? e.message : e}`);
     }
     if (token && chatId) {
-      sendToTelegram(`${username} 登录成功`);
+      await sendToTelegram(`${username} 登录成功`);
     } // 监听页面跳转到新话题，自动推送RSS example：https://linux.do/t/topic/525305.rss
     // 记录已推送过的 topicId，防止重复推送
     if (enableRssFetch || enableTopicDataFetch) {
@@ -536,136 +493,15 @@ async function launchBrowserForUser(username, password) {
     }
     return { browser };
   } catch (err) {
-    // throw new Error(err);
-    console.log("Error in launchBrowserForUser:", err);
-    if (token && chatId) {
-      sendToTelegram(`${err.message}`);
-    }
-    return { browser }; // 错误时仍然返回 browser
+    console.error(`${label} 失败：${err.message}`);
+    await closeBrowser(browser).catch((error) => console.warn(`${label} 关闭失败：${error.message}`));
+    if (token && chatId) await sendToTelegram(`${label} 失败：${err.message}`);
+    throw err;
   }
 }
-async function login(page, username, password, retryCount = 3) {
-  // 使用XPath查询找到包含"登录"或"login"文本的按钮
-  let loginButtonFound = await page.evaluate(() => {
-    let loginButton = Array.from(document.querySelectorAll("button")).find(
-      (button) =>
-        button.textContent.includes("登录") ||
-        button.textContent.includes("login")
-    ); // 注意loginButton 变量在外部作用域中是无法被 page.evaluate 内部的代码直接修改的。page.evaluate 的代码是在浏览器环境中执行的，这意味着它们无法直接影响 Node.js 环境中的变量
-    // 如果没有找到，尝试根据类名查找
-    if (!loginButton) {
-      loginButton = document.querySelector(".login-button");
-    }
-    if (loginButton) {
-      loginButton.click();
-      console.log("Login button clicked.");
-      return true; // 返回true表示找到了按钮并点击了
-    } else {
-      console.log("Login button not found.");
-      return false; // 返回false表示没有找到按钮
-    }
-  });
-  if (!loginButtonFound) {
-    if (loginUrl == "https://meta.appinn.net") {
-      await page.goto("https://meta.appinn.net/t/topic/52006", {
-        waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
-      });
-      await page.click(".discourse-reactions-reaction-button");
-    } else if (loginUrl == "https://www.uscardforum.com") {
-      await page.goto("https://www.uscardforum.com/t/topic/438315/1", {
-        waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
-      });
-      try {
-        await page.click(".discourse-reactions-reaction-button");
-      } catch (error) {
-        console.log("没有找到点赞按钮，可能是页面没有加载完成或按钮不存在");
-      }
-    } else {
-      await page.goto(`${loginUrl}/t/topic/1`, {
-        waitUntil: "domcontentloaded",
-        timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10),
-      });
-      try {
-        await page.click(".discourse-reactions-reaction-button");
-      } catch (error) {
-        console.log("没有找到点赞按钮，可能是页面没有加载完成或按钮不存在");
-      }
-    }
-  }
-  // 等待用户名输入框加载
-  await page.waitForSelector("#login-account-name");
-  // 模拟人类在找到输入框后的短暂停顿
-  await delayClick(1000); // 延迟500毫秒
-  // 清空输入框并输入用户名
-  await page.click("#login-account-name", { clickCount: 3 });
-  await page.type("#login-account-name", username, {
-    delay: 100,
-  }); // 输入时在每个按键之间添加额外的延迟
-  await delayClick(1000);
-  // 等待密码输入框加载
-  // await page.waitForSelector("#login-account-password");
-  // 模拟人类在输入用户名后的短暂停顿
-  // delayClick; // 清空输入框并输入密码
-  await page.click("#login-account-password", { clickCount: 3 });
-  await page.type("#login-account-password", password, {
-    delay: 100,
-  });
 
-  // 模拟人类在输入完成后思考的短暂停顿
-  await delayClick(1000);
-
-  // 假设登录按钮的ID是'login-button'，点击登录按钮
-  await page.waitForSelector("#login-button");
-  await delayClick(1000); // 模拟在点击登录按钮前的短暂停顿
-  await page.click("#login-button");
-  try {
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded" }), // 等待 页面跳转 DOMContentLoaded 事件
-      // 去掉上面一行会报错：Error: Execution context was destroyed, most likely because of a navigation. 可能是因为之后没等页面加载完成就执行了脚本
-      page.click("#login-button", { force: true }), // 点击登录按钮触发跳转
-    ]); //注意如果登录失败，这里会一直等待跳转，导致脚本执行失败 这点四个月之前你就发现了结果今天又遇到（有个用户遇到了https://linux.do/t/topic/169209/82），但是你没有在这个报错你提示我8.5
-  } catch (error) {
-    const alertError = await page.$(".alert.alert-error");
-    if (alertError) {
-      const alertText = await page.evaluate((el) => el.innerText, alertError); // 使用 evaluate 获取 innerText
-      if (
-        alertText.includes("incorrect") ||
-        alertText.includes("Incorrect ") ||
-        alertText.includes("不正确")
-      ) {
-        throw new Error(
-          `非超时错误，请检查用户名密码是否正确，失败用户 ${username[0] + "***"}, 错误信息：${alertText}`
-        );
-      } else {
-        throw new Error(
-          `非超时错误，也不是密码错误，可能是IP导致，需使用中国美国香港台湾IP，失败用户 ${username[0] + "***"}，错误信息：${alertText}`
-        );
-      }
-    } else {
-      if (retryCount > 0) {
-        console.log("Retrying login...");
-        await page.reload({ waitUntil: "domcontentloaded", timeout: parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10) });
-        await delayClick(2000); // 增加重试前的延迟
-        return await login(page, username, password, retryCount - 1);
-      } else {
-        throw new Error(
-          `Navigation timed out in login.超时了,可能是IP质量问题,失败用户 ${username[0] + "***"}, 
-      ${error}`
-        ); //{password}
-      }
-    }
-  }
-  await delayClick(1000);
-}
-
-async function navigatePage(url, page, browser) {
-  try {
-    page.setDefaultNavigationTimeout(
-      parseInt(process.env.NAV_TIMEOUT_MS || process.env.NAV_TIMEOUT || "120000", 10)
-    );
-  } catch {}
+async function navigatePage(url, page) {
+  page.setDefaultNavigationTimeout(navigationTimeout);
   await page.goto(url, { waitUntil: "domcontentloaded" }); //如果使用默认的load,linux下页面会一直加载导致无法继续执行
 
   const startTime = Date.now(); // 记录开始时间
@@ -683,8 +519,7 @@ async function navigatePage(url, page, browser) {
     if (Date.now() - startTime > 35000) {
       console.log("Timeout exceeded, aborting actions.");
       sendToTelegram(`超时了,无法通过Cloudflare验证`);
-      await browser.close();
-      return; // 超时则退出函数
+      throw new Error("Cloudflare 验证超时");
     }
   }
   console.log("页面标题：", pageTitle);
@@ -801,8 +636,16 @@ healthApp.get("/", (req, res) => {
     </html>
   `);
 });
-healthApp.listen(HEALTH_PORT, () => {
+const healthServer = healthApp.listen(HEALTH_PORT, () => {
   console.log(
     `Health check endpoint is running at http://localhost:${HEALTH_PORT}/health`
   );
 });
+
+// Leave time for batch cleanup before the Actions job timeout. Expiring this
+// watchdog means work did not finish, so never report a successful run.
+shutdownTimer = setTimeout(() => {
+  console.error("运行时间预算及清理宽限期已耗尽");
+  process.exit(1);
+}, runTimeLimitMillis + 120000);
+await runAccounts();

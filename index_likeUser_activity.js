@@ -18,7 +18,11 @@
 // ==/UserScript==
 
 (function () {
-  ("use strict");
+  "use strict";
+  if (window.__autoInjected) return;
+  window.__autoInjected = true;
+
+  function initialize() {
   // 定义可能的基本URL
   const possibleBaseURLs = [
     "https://www.uscardforum.com",
@@ -63,20 +67,22 @@
 
   console.log(`Initial clickCounter: ${clickCounter}`);
   // 入口函数
-  window.addEventListener("load", () => {
+  let nextPostTimer = null;
+  function startReading() {
     console.log("autoRead", localStorage.getItem("read"));
     checkFirstRun();
     if (localStorage.getItem("read") === "true") {
       console.log("点赞开始");
-      setTimeout(() => {
+      nextPostTimer = setTimeout(async () => {
+        if (localStorage.getItem("read") !== "true") return;
         likeSpecificPost();
         // 点赞完成后再调用openSpecificUserPost，这样可以检查read标志
         if (localStorage.getItem("read") === "true") {
-          openSpecificUserPost();
+          await openSpecificUserPost();
         }
       }, 2000);
     }
-  });
+  }
   function checkFirstRun() {
     if (localStorage.getItem("isFirstRun") === null) {
       console.log("脚本第一次运行，执行初始化操作...");
@@ -92,71 +98,69 @@
     console.log("执行了初始数据更新操作");
   }
 
-  function getLatestTopic() {
-    let lastOffset = Number(localStorage.getItem("lastOffset")) || 0;
-    let specificUserPostList = [];
-    let isDataSufficient = false;
-
-    while (!isDataSufficient) {
-      //   lastOffset += 20;
-      lastOffset += 1; //对于page来说
-      // 举例：https://linux.do/user_actions.json?offset=0&username=14790897&filter=5
-      //   const url = `${BASE_URL}/user_actions.json?offset=${lastOffset}&username=${specificUser}&filter=5`;
-      //举例：https://linux.do/search?q=%4014790897%20in%3Aunseen
-      const url = `${BASE_URL}/search?q=%40${specificUser}%20order%3Alatest`; //&page=${lastOffset}
-      $.ajax({
-        url: url,
-        async: false,
-        headers: {
-          Accept: "application/json",
-        },
-        success: function (result) {
-          //   if (result && result.user_actions && result.user_actions.length > 0) {
-          // result.user_actions.forEach((action) => {
-          if (result && result.posts && result.posts.length > 0) {
-            result.posts.forEach((action) => {
-              const topicId = action.topic_id;
-              //   const postId = action.post_id;
-              const postNumber = action.post_number;
-              specificUserPostList.push({
-                topic_id: topicId,
-                // post_id: postId,
-                post_number: postNumber,
-              });
-            });
-
-            // 检查是否已获得足够的 Posts
-            if (specificUserPostList.length >= specificUserPostListLimit) {
-              isDataSufficient = true;
-            }
-          } else {
-            isDataSufficient = true; // 没有更多内容时停止请求
-          }
-        },
-        error: function (XMLHttpRequest, textStatus, errorThrown) {
-          console.error(XMLHttpRequest, textStatus, errorThrown);
-          isDataSufficient = true; // 遇到错误时也停止请求
-        },
+  // Keep this helper self-contained: these files also run as standalone userscripts.
+  async function requestTopicData(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let retryAfter = 0;
+    try {
+      const response = await fetch(url, {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+        signal: controller.signal,
       });
+      if (response.status === 429) {
+        const value = response.headers.get("Retry-After");
+        retryAfter = /^\d+$/.test(value || "")
+          ? Number(value) * 1000
+          : Math.max(0, Date.parse(value) - Date.now()) || 0;
+        localStorage.setItem("autoLikeEnabled", "false");
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      localStorage.removeItem("autoReadFetchFailures");
+      return result;
+    } catch (error) {
+      const failures = Math.min(5, (Number(localStorage.getItem("autoReadFetchFailures")) || 0) + 1);
+      const wait = Math.max(retryAfter, Math.min(900000, 60000 * 2 ** (failures - 1)));
+      localStorage.setItem("autoReadFetchFailures", String(failures));
+      localStorage.setItem("autoReadRetryAfter", String(Date.now() + wait));
+      console.warn(`读取帖子列表失败 (${error.message})，${Math.ceil(wait / 1000)} 秒后重试`);
+      return null;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    // 如果列表超出限制，则截断
-    if (specificUserPostList.length > specificUserPostListLimit) {
-      specificUserPostList = specificUserPostList.slice(
-        0,
-        specificUserPostListLimit
-      );
-    }
-
-    // 存储 lastOffset 和 specificUserPostList 到 localStorage
-    localStorage.setItem("lastOffset", lastOffset);
-    localStorage.setItem(
-      "specificUserPostList",
-      JSON.stringify(specificUserPostList)
-    );
   }
 
-  function openSpecificUserPost() {
+  async function getLatestTopic() {
+    const specificUserPostList = [];
+    const seen = new Set();
+    // The old loop fetched the same first page repeatedly; request bounded, distinct pages.
+    for (let page = 1; page <= 5 && specificUserPostList.length < specificUserPostListLimit; page++) {
+      if (localStorage.getItem("read") !== "true") break;
+      if (page > 1) await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (localStorage.getItem("read") !== "true") break;
+      const query = encodeURIComponent(`@${specificUser} order:latest`);
+      const result = await requestTopicData(`${BASE_URL}/search?q=${query}&page=${page}`);
+      if (!Array.isArray(result?.posts) || result.posts.length === 0) break;
+      let newPosts = 0;
+      for (const post of result.posts) {
+        const key = `${post.topic_id}/${post.post_number}`;
+        if (!post.topic_id || !post.post_number || seen.has(key)) continue;
+        seen.add(key);
+        newPosts++;
+        specificUserPostList.push({ topic_id: post.topic_id, post_number: post.post_number });
+      }
+      if (newPosts === 0) break;
+    }
+    localStorage.setItem("specificUserPostList", JSON.stringify(specificUserPostList.slice(0, specificUserPostListLimit)));
+  }
+
+  let openingPost = false;
+  async function openSpecificUserPost() {
+    if (openingPost) return;
+    openingPost = true;
+    try {
     if (localStorage.getItem("read") !== "true") {
       console.log("read flag is false, aborting navigation");
       return;
@@ -168,15 +172,18 @@
 
     // 如果列表为空，则获取最新文章
     if (specificUserPostList.length === 0) {
-      getLatestTopic();
+      if (Date.now() >= (Number(localStorage.getItem("autoReadRetryAfter")) || 0)) {
+        await getLatestTopic();
+      }
       specificUserPostListStr = localStorage.getItem("specificUserPostList");
       specificUserPostList = specificUserPostListStr
         ? JSON.parse(specificUserPostListStr)
         : [];
     }
 
+    if (localStorage.getItem("read") !== "true") return;
     // 如果获取到新文章，打开第一个
-    if (specificUserPostList.length > 0) {
+    if (specificUserPostList.length > 0 && Date.now() >= (Number(localStorage.getItem("autoReadRetryAfter")) || 0)) {
       const post = specificUserPostList.shift(); // 获取列表中的第一个对象
       localStorage.setItem(
         "specificUserPostList",
@@ -186,6 +193,12 @@
       window.location.href = `${BASE_URL}/t/topic/${post.topic_id}/${post.post_number}`;
     } else {
       console.error("未能获取到新的帖子数据。");
+      const retryIn = Math.max(60000, (Number(localStorage.getItem("autoReadRetryAfter")) || 0) - Date.now());
+      if (nextPostTimer !== null) clearTimeout(nextPostTimer);
+      nextPostTimer = setTimeout(openSpecificUserPost, retryIn);
+    }
+    } finally {
+      openingPost = false;
     }
   }
 
@@ -195,7 +208,13 @@
   // const targetId = `discourse-reactions-counter-${postId}-right`;
 
   // const element = document.getElementById(targetId);
+  function canLikeSpecificPost() {
+    return localStorage.getItem("read") === "true" &&
+      localStorage.getItem("autoLikeEnabled") !== "false";
+  }
+
   function likeSpecificPost() {
+    if (!canLikeSpecificPost()) return;
     const urlParts = window.location.pathname.split("/");
     const lastPart = urlParts[urlParts.length - 1]; // 获取最后一部分
     let buttons, reactionButton;
@@ -246,7 +265,7 @@
       localStorage.setItem("read", "false");
       return;
     } else {
-      triggerClick(reactionButton);
+      if (!triggerClick(reactionButton)) return;
       clickCounter++;
       console.log(
         `Clicked like button ${clickCounter},已点赞用户${specificUser}`
@@ -263,12 +282,14 @@
   }
 
   function triggerClick(button) {
+    if (!canLikeSpecificPost()) return false;
     const event = new MouseEvent("click", {
       bubbles: true,
       cancelable: true,
       view: window,
     });
     button.dispatchEvent(event);
+    return true;
   }
 
   const button = document.createElement("button");
@@ -290,6 +311,10 @@
     const newReadState = !currentlyReading;
     localStorage.setItem("read", newReadState.toString());
     button.textContent = newReadState ? "停止阅读" : "开始阅读";
+    if (!newReadState && nextPostTimer !== null) {
+      clearTimeout(nextPostTimer);
+      nextPostTimer = null;
+    }
     if (newReadState) {
       if (BASE_URL == "https://linux.do") {
         const maxPostNumber = 600;
@@ -402,4 +427,14 @@
     localStorage.removeItem("specificUserPostList");
     console.log("所有数据已清除，除了 specificUser 和 specificUserPostList");
   };
+
+  if (document.readyState === "complete") startReading();
+  else window.addEventListener("load", startReading, { once: true });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initialize, { once: true });
+  } else {
+    initialize();
+  }
 })();

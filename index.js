@@ -19,15 +19,19 @@
 // ==/UserScript==
 
 (function () {
-  ("use strict");
+  "use strict";
+  if (window.__autoInjected) return;
+  window.__autoInjected = true;
+
+  function initialize() {
   // 定义可能的基本URL
   const possibleBaseURLs = [
-    "https://www.uscardforum.com/",
+    "https://www.uscardforum.com",
     "https://linux.do",
     "https://meta.discourse.org",
     "https://meta.appinn.net",
     "https://community.openai.com",
-    "https://idcflare.com/",
+    "https://idcflare.com",
   ];
   const commentLimit = 2000;
   const topicListLimit = 200;
@@ -81,69 +85,84 @@
     }, delayPerStep); // 每50毫秒滚动20像素
   }
 
-  function getLatestTopic() {
-    let latestPage = Number(localStorage.getItem("latestPage")) || 0;
-    let topicList = [];
-    let isDataSufficient = false;
-
-    while (!isDataSufficient) {
-      latestPage++;
-      const url = `${BASE_URL}/latest.json?no_definitions=true&page=${latestPage}`;
-
-      $.ajax({
-        url: url,
-        async: false,
-        success: function (result) {
-          if (
-            result &&
-            result.topic_list &&
-            result.topic_list.topics.length > 0
-          ) {
-            result.topic_list.topics.forEach((topic) => {
-              // 未读且评论数小于 commentLimit
-              if (commentLimit > topic.posts_count) {
-                //其实不需要 !topic.unseen &&
-                topicList.push(topic);
-              }
-            });
-
-            // 检查是否已获得足够的 topics
-            if (topicList.length >= topicListLimit) {
-              isDataSufficient = true;
-            }
-          } else {
-            isDataSufficient = true; // 没有更多内容时停止请求
-          }
-        },
-        error: function (XMLHttpRequest, textStatus, errorThrown) {
-          console.error(XMLHttpRequest, textStatus, errorThrown);
-          isDataSufficient = true; // 遇到错误时也停止请求
-        },
+  // Keep this helper self-contained: these files also run as standalone userscripts.
+  async function requestTopicData(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let retryAfter = 0;
+    try {
+      const response = await fetch(url, {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+        signal: controller.signal,
       });
+      if (response.status === 429) {
+        const value = response.headers.get("Retry-After");
+        retryAfter = /^\d+$/.test(value || "")
+          ? Number(value) * 1000
+          : Math.max(0, Date.parse(value) - Date.now()) || 0;
+        localStorage.setItem("autoLikeEnabled", "false");
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      localStorage.removeItem("autoReadFetchFailures");
+      return result;
+    } catch (error) {
+      const failures = Math.min(5, (Number(localStorage.getItem("autoReadFetchFailures")) || 0) + 1);
+      const wait = Math.max(retryAfter, Math.min(900000, 60000 * 2 ** (failures - 1)));
+      localStorage.setItem("autoReadFetchFailures", String(failures));
+      localStorage.setItem("autoReadRetryAfter", String(Date.now() + wait));
+      console.warn(`读取帖子列表失败 (${error.message})，${Math.ceil(wait / 1000)} 秒后重试`);
+      return null;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    if (topicList.length > topicListLimit) {
-      topicList = topicList.slice(0, topicListLimit);
-    }
-
-    // 其实不需要对latestPage操作
-    // localStorage.setItem("latestPage", latestPage);
-    localStorage.setItem("topicList", JSON.stringify(topicList));
   }
 
-  function openNewTopic() {
+  async function getLatestTopic() {
+    const topicList = [];
+    const seen = new Set();
+    // Yield between pages and stop even if the server repeats or filters every result.
+    for (let page = 0; page < 10 && topicList.length < topicListLimit; page++) {
+      if (localStorage.getItem("read") !== "true") break;
+      if (page > 0) await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (localStorage.getItem("read") !== "true") break;
+      const result = await requestTopicData(`${BASE_URL}/latest.json?no_definitions=true&page=${page}`);
+      const topics = result?.topic_list?.topics;
+      if (!Array.isArray(topics) || topics.length === 0) break;
+      let newTopics = 0;
+      for (const topic of topics) {
+        if (!topic.id || seen.has(topic.id)) continue;
+        seen.add(topic.id);
+        newTopics++;
+        if (commentLimit > topic.posts_count) topicList.push(topic);
+      }
+      if (newTopics === 0) break;
+    }
+    localStorage.setItem("topicList", JSON.stringify(topicList.slice(0, topicListLimit)));
+  }
+
+  let openingTopic = false;
+  async function openNewTopic() {
+    if (openingTopic || localStorage.getItem("read") !== "true") return;
+    openingTopic = true;
+    try {
     let topicListStr = localStorage.getItem("topicList");
     let topicList = topicListStr ? JSON.parse(topicListStr) : [];
 
     // 如果列表为空，则获取最新文章
     if (topicList.length === 0) {
-      getLatestTopic();
+      if (Date.now() >= (Number(localStorage.getItem("autoReadRetryAfter")) || 0)) {
+        await getLatestTopic();
+      }
       topicListStr = localStorage.getItem("topicList");
       topicList = topicListStr ? JSON.parse(topicListStr) : [];
     }
 
+    if (localStorage.getItem("read") !== "true") return;
+
     // 如果获取到新文章，打开第一个
-    if (topicList.length > 0) {
+    if (topicList.length > 0 && Date.now() >= (Number(localStorage.getItem("autoReadRetryAfter")) || 0)) {
       const topic = topicList.shift();
       localStorage.setItem("topicList", JSON.stringify(topicList));
       // 设置标志，表示刚进入新帖子，需要延迟后再开始浏览
@@ -153,18 +172,25 @@
       } else {
         window.location.href = `${BASE_URL}/t/topic/${topic.id}`;
       }
+    } else {
+      const retryIn = Math.max(60000, (Number(localStorage.getItem("autoReadRetryAfter")) || 0) - Date.now());
+      if (checkScrollTimeout !== null) clearTimeout(checkScrollTimeout);
+      checkScrollTimeout = setTimeout(checkScroll, retryIn);
+    }
+    } finally {
+      openingTopic = false;
     }
   }
 
   // 检查是否已滚动到底部(不断重复执行),到底部时跳转到下一个话题
-  function checkScroll() {
-    if (localStorage.getItem("read")) {
+  async function checkScroll() {
+    if (localStorage.getItem("read") === "true") {
       if (
         window.innerHeight + window.scrollY >=
         document.body.offsetHeight - 100
       ) {
         console.log("已滚动到底部");
-        openNewTopic();
+        await openNewTopic();
       } else {
         scrollToBottomSlowly();
         if (checkScrollTimeout !== null) {
@@ -176,7 +202,7 @@
   }
 
   // 入口函数
-  window.addEventListener("load", () => {
+  function startReading() {
     checkFirstRun();
     console.log(
       "autoRead",
@@ -206,7 +232,7 @@
         }
       }
     }
-  });
+  }
 
   // 获取当前时间戳
   const currentTime = Date.now();
@@ -272,6 +298,7 @@
       const randomDelay = 2000 + Math.floor(Math.random() * 3000);
 
       autoLikeInterval = setTimeout(() => {
+        if (localStorage.getItem("read") !== "true" || !isAutoLikeEnabled() || clickCounter >= likeLimit) return;
         // 模拟点击
         triggerClick(button); // 使用自定义的触发点击方法
         console.log(`Clicked like button ${index + 1}`);
@@ -365,5 +392,15 @@
   // 设置自动点赞的启用状态
   function setAutoLikeEnabled(enabled) {
     localStorage.setItem("autoLikeEnabled", enabled ? "true" : "false");
+  }
+
+  if (document.readyState === "complete") startReading();
+  else window.addEventListener("load", startReading, { once: true });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initialize, { once: true });
+  } else {
+    initialize();
   }
 })();

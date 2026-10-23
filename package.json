@@ -1,5 +1,8 @@
 {
   "type": "module",
+  "scripts": {
+    "test": "node --test src/accounts.test.js src/account_runner.test.js src/discourse_login.test.js src/reading_scripts.test.js"
+  },
   "dependencies": {
     "@playwright/test": "^1.56.1",
     "dotenv": "^16.4.5",

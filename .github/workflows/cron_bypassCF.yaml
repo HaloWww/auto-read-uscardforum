@@ -5,6 +5,11 @@ on:
     # 每天 UTC 时间 19:40 运行
     - cron: "26 10 * * *"
   workflow_dispatch: # 允许手动触发
+    inputs:
+      login_only:
+        description: '仅验证全部账号登录，不阅读、点赞或发送通知'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -21,6 +26,7 @@ jobs:
       WEBSITE: ${{ secrets.WEBSITE }}
       RUN_TIME_LIMIT_MINUTES: ${{ secrets.RUN_TIME_LIMIT_MINUTES }}
       MAX_CONCURRENT_ACCOUNTS: ${{ secrets.MAX_CONCURRENT_ACCOUNTS }}
+      LOGIN_ONLY: ${{ inputs.login_only || false }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}

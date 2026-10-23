@@ -2,6 +2,7 @@ import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import puppeteer from "puppeteer";
 import { isLoggedIn, loginDiscourse } from "./discourse_login.js";
 
@@ -36,7 +37,7 @@ const form = `<form method="post" action="/submit">
 // Each test owns a local server and browser page. No request or credential ever
 // reaches the real forum; the fixture deliberately implements both Discourse
 // login completion styles instead of mocking Puppeteer's browser APIs.
-async function forum(t, mode = "ajax") {
+async function forum(t, mode = "ajax", browserClient = browser) {
   const state = { loginRequests: 0, submissions: [] };
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "text/html; charset=utf-8");
@@ -87,7 +88,7 @@ async function forum(t, mode = "ajax") {
     response.end(`<!doctype html>${mode === "already" ? authenticatedHeader : visitorHeader}${topicAvatar}`);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const page = await browser.newPage();
+  const page = await browserClient.newPage();
   t.after(async () => {
     await page.close();
     server.closeAllConnections();
@@ -170,3 +171,32 @@ test("a current-user marker alongside visible login controls is not authenticate
   }, currentUser);
   assert.equal(await isLoggedIn(page), false);
 });
+
+// Production connects through puppeteer-real-browser's patched Puppeteer core.
+// A normal Puppeteer-only fixture does not exercise that transport's handling
+// of execution contexts during redirects. Attach it to the same headless local
+// Chrome rather than launching the real-browser package's visible browser.
+for (const mode of ["ajax", "navigation"]) {
+  test(`patched transport observes ${mode} login without a timeout or retry`, { timeout: 15000 }, async (t) => {
+    const require = createRequire(import.meta.url);
+    const realBrowserRequire = createRequire(require.resolve("puppeteer-real-browser"));
+    const patchedPuppeteer = realBrowserRequire("rebrowser-puppeteer-core");
+    const patchedBrowser = await patchedPuppeteer.connect({
+      browserWSEndpoint: browser.wsEndpoint(),
+      defaultViewport: null,
+    });
+    const { page, state } = await forum(t, mode, patchedBrowser);
+    t.after(() => patchedBrowser.disconnect());
+    let retries = 0;
+    await loginDiscourse(page, "fixture-user", "fixture-password", {
+      timeout: 1500,
+      attempts: 2,
+      onRetry: () => { retries++; },
+    });
+
+    assert.equal(retries, 0, "successful authentication must be recognized on the first attempt");
+    assert.equal(state.loginRequests, 1);
+    assert.equal(state.submissions.length, 1);
+    assert.equal(await isLoggedIn(page), true);
+  });
+}

@@ -2,7 +2,7 @@ name: readLike
 
 on:
   schedule:
-    - cron: '26 10 * * *'
+    - cron: '30 9 * * *'
   workflow_dispatch:
     inputs:
       login_only:

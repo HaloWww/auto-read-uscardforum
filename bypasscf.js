@@ -54,6 +54,9 @@ async function closeBrowser(browser) {
   if (!browser) return;
   const monitor = monitors.get(browser);
   if (monitor) {
+    await monitor.sample().catch((error) => {
+      if (!runtimeErrors.has(browser)) runtimeErrors.set(browser, error);
+    });
     monitor.stop();
     const progress = monitor.summary();
     if (!runtimeErrors.has(browser) && (!progress.documents || progress.scrolls + progress.topicTransitions === 0)) {

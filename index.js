@@ -16,8 +16,22 @@
       localStorage.setItem("clickCounter", "0");
       localStorage.setItem("clickCounterTimestamp", String(Date.now()));
     }
+    const counters = { documents: 0, scrolls: 0, topicTransitions: 0, likeAttempts: 0 };
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("autoReadCounters") || "null");
+      for (const key of Object.keys(counters)) {
+        if (Number.isSafeInteger(saved?.[key]) && saved[key] >= 0) counters[key] = saved[key];
+      }
+    } catch { /* A missing or corrupt snapshot must not stop reading. */ }
+    function countActivity(key) {
+      counters[key]++;
+      // Keep each tab's totals through document navigations without relying on
+      // browser console events, which the production transport can suppress.
+      try { sessionStorage.setItem("autoReadCounters", JSON.stringify(counters)); } catch { /* Keep live counters. */ }
+    }
+    countActivity("documents");
     const status = window.__autoReadStatus = {
-      started: true, startedAt: Date.now(), lastTickAt: Date.now(), phase: "reading", retryAt: 0, error: null,
+      started: true, startedAt: Date.now(), lastTickAt: Date.now(), phase: "reading", retryAt: 0, error: null, counters,
     };
     const emit = (type) => console.log("[auto-read]", JSON.stringify({ type }));
     const isReading = () => localStorage.getItem("read") === "true";
@@ -124,6 +138,7 @@
           localStorage.setItem("justOpenedNewTopic", "true");
           path = `/t/topic/${item.id}${item.last_read_post_number ? `/${item.last_read_post_number}` : ""}`;
         }
+        countActivity("topicTransitions");
         emit("topic");
         window.location.href = `${baseUrl}${path}`;
       } catch (error) {
@@ -169,6 +184,7 @@
           if (!canLike() || button.isConnected === false || (key && attempted.has(key)) ||
               !["点赞此帖子", "Like this post"].includes(button.title)) return;
           if (key) attempted.add(key);
+          countActivity("likeAttempts");
           emit("like-attempt");
           button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
           clickCounter++;
@@ -189,7 +205,10 @@
         scanLikes();
         const before = window.scrollY;
         window.scrollBy(0, 200);
-        if (window.scrollY !== before && (++scrollSteps === 1 || scrollSteps % 20 === 0)) emit("scroll");
+        if (window.scrollY !== before) {
+          countActivity("scrolls");
+          if (++scrollSteps === 1 || scrollSteps % 20 === 0) emit("scroll");
+        }
         const height = Math.max(document.body?.offsetHeight || 0, document.body?.scrollHeight || 0,
           document.documentElement?.scrollHeight || 0);
         const atBottom = window.innerHeight + window.scrollY >= height - 100;

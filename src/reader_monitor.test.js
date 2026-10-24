@@ -42,12 +42,15 @@ class Page extends EventEmitter {
     this.frame = {};
     this.closed = false;
     this.evaluations = 0;
+    this.counters = { documents: 1, scrolls: 0, topicTransitions: 0, likeAttempts: 0 };
   }
   mainFrame() { return this.frame; }
   url() { return "https://forum.test/t/topic/123/1"; }
   isClosed() { return this.closed; }
   state() {
-    return { injected: true, read: "true", status: { started: true, lastTickAt: this.clock.now(), phase: "reading" } };
+    return { injected: true, read: "true", status: {
+      started: true, lastTickAt: this.clock.now(), phase: "reading", counters: { ...this.counters },
+    } };
   }
   async evaluate() { this.evaluations++; return this.state(); }
   event(type, extra = {}) {
@@ -78,18 +81,11 @@ function fixture(options = {}) {
   return { clock, page, browser, failures, logs, monitor, setPage: (next) => { current = next; } };
 }
 
-test("monitor counts reader activity and only matching main-frame POST responses", async () => {
+test("monitor samples persistent activity counters without Runtime console events and matches main-frame POST responses", async () => {
   const { page, monitor, clock, logs, failures } = fixture();
   monitor.attach(page).start();
-  assert.equal(page.listenerCount("console"), 1);
-  page.event("started");
-  page.event("scroll", { count: 3 });
-  page.event("scroll");
-  page.event("scroll", { count: -1 });
-  page.event("topic");
-  page.event("like-attempt");
-  page.event("like-attempt");
-  page.emit("console", { text: () => "[auto-read] not json" });
+  assert.equal(page.listenerCount("console"), 0);
+  Object.assign(page.counters, { documents: 1, scrolls: 4, topicTransitions: 1, likeAttempts: 2 });
   page.response();
   page.response({ path: "/post_actions", status: 201 });
   page.response({ status: 429 });
@@ -106,6 +102,55 @@ test("monitor counts reader activity and only matching main-frame POST responses
   assert.ok(logs.some((line) => line.includes("已运行 1 分钟") && line.includes("点赞 HTTP 2xx 2")));
   assert.ok(logs.every((line) => !line.includes("https://")));
   assert.deepEqual(failures, []);
+});
+
+test("sampling before a one-minute heartbeat captures short runs and repeated samples do not double count", async () => {
+  const { page, monitor, clock, failures } = fixture();
+  monitor.start();
+  Object.assign(page.counters, { documents: 2, scrolls: 25, topicTransitions: 1, likeAttempts: 3 });
+  await clock.advance(12000);
+  await monitor.sample();
+  await monitor.sample();
+  page.event("scroll", { count: 500 });
+  const result = monitor.stop();
+  assert.deepEqual(result, {
+    documents: 2, scrolls: 25, topicTransitions: 1, likeAttempts: 3,
+    likeAccepted: 0, rateLimits: 0, checks: 0, elapsedMillis: 12000,
+  });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(await monitor.sample(), result);
+  assert.equal(page.evaluations, 2);
+});
+
+test("counters survive document changes and invalid or regressed values cannot corrupt activity totals", async () => {
+  const { page, monitor, clock } = fixture();
+  monitor.start();
+  Object.assign(page.counters, { documents: 2, scrolls: 25, topicTransitions: 1, likeAttempts: 3 });
+  await monitor.sample();
+  Object.assign(page.counters, { documents: 3, scrolls: 40, topicTransitions: 2, likeAttempts: 4 });
+  await clock.advance(60000);
+  Object.assign(page.counters, { documents: -1, scrolls: NaN, topicTransitions: 1, likeAttempts: "500" });
+  await monitor.sample();
+  assert.deepEqual(monitor.stop(), {
+    documents: 3, scrolls: 40, topicTransitions: 2, likeAttempts: 4,
+    likeAccepted: 0, rateLimits: 0, checks: 1, elapsedMillis: 60000,
+  });
+});
+
+test("final sampling retries a transient navigation before reading persistent counters", async () => {
+  let verifications = 0;
+  const { page, monitor, clock } = fixture({ verify: async () => { verifications++; } });
+  monitor.start();
+  page.counters.scrolls = 12;
+  page.evaluate = async () => {
+    if (++page.evaluations === 1) throw new Error("Execution context was destroyed");
+    return page.state();
+  };
+  await clock.advance(10000);
+  await monitor.sample();
+  assert.equal(monitor.stop().scrolls, 12);
+  assert.equal(verifications, 1);
+  assert.equal(page.evaluations, 2);
 });
 
 test("stop removes listeners, freezes the summary and prevents later checks or duplicate final logs", async () => {
@@ -156,6 +201,21 @@ test("stopping during an unfinished check cancels its deadline and ignores the l
   assert.deepEqual(monitor.summary(), result);
   assert.deepEqual(failures, []);
   assert.equal(logs.filter((line) => line.includes("已运行")).length, 0);
+});
+
+test("stopping an in-flight final sample releases its caller without waiting for an unresponsive page", async () => {
+  const { page, monitor, clock } = fixture();
+  let complete;
+  page.evaluate = () => new Promise((resolve) => { complete = resolve; });
+  monitor.start();
+  const pending = monitor.sample();
+  const result = monitor.stop();
+  assert.deepEqual(await pending, result);
+  assert.equal(clock.pending(), 0);
+  page.counters.scrolls = 100;
+  complete(page.state());
+  await flush();
+  assert.deepEqual(monitor.summary(), result);
 });
 
 test("a stale reader fails once and cannot keep reporting successful heartbeats", async () => {

@@ -12,12 +12,20 @@ const response = (data = {}, status = 200, retryAfter = null) => ({
 const itemsFor = (script) => script === "index.js"
   ? { topic_list: { topics: [{ id: 123, posts_count: 5 }] } }
   : { posts: [{ topic_id: 123, post_number: 4 }] };
+const makeStorage = (initial = {}) => {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+};
 
 // Real timer ordering and clamped scrolling, without an external forum or a
 // wall-clock wait. Navigation ends this document just as it does in a browser.
 function browser(script, {
   readyState = "complete", height = 100, fetch, querySelectorAll = () => [],
-  storage, target = true, url = "https://www.uscardforum.com/t/topic/438315/1", random = () => 0,
+  storage, session = makeStorage(), target = true, url = "https://www.uscardforum.com/t/topic/438315/1", random = () => 0,
 } = {}) {
   let now = 0;
   let nextTimer = 0;
@@ -66,7 +74,7 @@ function browser(script, {
   };
   class ClockDate extends Date { static now() { return now; } }
   const context = vm.createContext({
-    window, document, localStorage, Date: ClockDate, AbortController,
+    window, document, localStorage, sessionStorage: session, Date: ClockDate, AbortController,
     Math: Object.assign(Object.create(Math), { random }),
     MouseEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
     console: {
@@ -106,7 +114,7 @@ function browser(script, {
       listeners.delete("DOMContentLoaded");
     },
     setHeight(value) { contentHeight = value; },
-    localStorage, document, window, requests, navigations, errors, events,
+    localStorage, sessionStorage: session, document, window, requests, navigations, errors, events,
     get now() { return now; },
     get timerCount() { return timers.size; },
   };
@@ -356,3 +364,68 @@ test("latest topics skip large threads but stop after the pagination bound", asy
   assert.equal(page.window.__autoReadStatus.phase, "cooldown");
   assert.deepEqual(page.errors, []);
 });
+
+for (const script of scripts) {
+  test(`${script}: activity counters persist across documents and stay isolated to one tab`, async () => {
+    let clicks = 0;
+    const { button, anchor } = reaction(() => clicks++);
+    const first = browser(script, {
+      height: 1000, querySelectorAll: () => [script === "index.js" ? button : anchor],
+    });
+    first.localStorage.setItem("autoLikeEnabled", "true");
+    first.localStorage.setItem(script === "index.js" ? "topicList" : "specificUserPostList",
+      JSON.stringify([script === "index.js" ? { id: 123 } : { topic_id: 123, post_number: 4 }]));
+    first.inject();
+    await first.advance(5000);
+    assert.equal(clicks, 1);
+    assert.equal(first.navigations.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(first.window.__autoReadStatus.counters)), {
+      documents: 1, scrolls: 1, topicTransitions: 1, likeAttempts: 1,
+    });
+
+    const second = browser(script, {
+      height: 1400, storage: first.localStorage, session: first.sessionStorage, url: first.navigations[0],
+    });
+    second.inject();
+    second.inject();
+    await second.advance(2000);
+    const totals = { documents: 2, scrolls: 4, topicTransitions: 1, likeAttempts: 1 };
+    assert.deepEqual(JSON.parse(JSON.stringify(second.window.__autoReadStatus.counters)), totals);
+    assert.deepEqual(JSON.parse(second.sessionStorage.getItem("autoReadCounters")), totals);
+    assert.deepEqual(second.errors, []);
+
+    const independentTab = browser(script, { storage: first.localStorage });
+    independentTab.inject();
+    assert.deepEqual(JSON.parse(JSON.stringify(independentTab.window.__autoReadStatus.counters)), {
+      documents: 1, scrolls: 0, topicTransitions: 0, likeAttempts: 0,
+    });
+  });
+
+  test(`${script}: idle and failed-list ticks do not count as scrolls or topic transitions`, async () => {
+    const page = browser(script, { fetch: () => response({}, 503) });
+    page.inject();
+    await page.advance(10000);
+    assert.equal(page.window.__autoReadStatus.lastTickAt, 10000);
+    assert.equal(page.window.scrollY, 0);
+    assert.deepEqual(JSON.parse(JSON.stringify(page.window.__autoReadStatus.counters)), {
+      documents: 1, scrolls: 0, topicTransitions: 0, likeAttempts: 0,
+    });
+    assert.deepEqual(page.errors, []);
+  });
+
+  test(`${script}: corrupt counter snapshots are recovered without stopping the loop`, async () => {
+    for (const saved of ["not-json", "null", "[]", JSON.stringify({
+      documents: 4, scrolls: 3, topicTransitions: -1, likeAttempts: "5",
+    })]) {
+      const page = browser(script, { session: makeStorage({ autoReadCounters: saved }) });
+      page.inject();
+      await page.advance(1000);
+      const totals = JSON.parse(JSON.stringify(page.window.__autoReadStatus.counters));
+      assert.deepEqual(totals, saved.startsWith("{")
+        ? { documents: 5, scrolls: 3, topicTransitions: 0, likeAttempts: 0 }
+        : { documents: 1, scrolls: 0, topicTransitions: 0, likeAttempts: 0 });
+      assert.equal(page.window.__autoReadStatus.lastTickAt, 1000);
+      assert.deepEqual(page.errors, []);
+    }
+  });
+}

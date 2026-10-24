@@ -10,7 +10,7 @@ export function createReaderMonitor({
     likeAccepted: 0, checks: 0, rateLimits: 0,
   };
   const attached = new Map();
-  const evaluationTimers = new Set();
+  const evaluationTimers = new Map();
   let startedAt;
   let stoppedAt;
   let timer;
@@ -31,7 +31,10 @@ export function createReaderMonitor({
     running = false;
     stoppedAt ??= now();
     if (timer !== undefined) cancel(timer);
-    for (const timeout of evaluationTimers) cancel(timeout);
+    for (const [timeout, abort] of evaluationTimers) {
+      cancel(timeout);
+      abort(new Error("阅读监控已停止"));
+    }
     evaluationTimers.clear();
     for (const [page, listeners] of attached) {
       for (const [event, listener] of Object.entries(listeners)) page.off(event, listener);
@@ -47,22 +50,6 @@ export function createReaderMonitor({
 
   function attach(page) {
     if (stopped || attached.has(page)) return api;
-    const onConsole = (message) => {
-      if (page !== getPage()) return;
-      try {
-        const text = message.text();
-        if (!text.startsWith("[auto-read] ")) return;
-        const event = JSON.parse(text.slice("[auto-read] ".length));
-        if (event.type === "started") counts.documents++;
-        else if (event.type === "scroll") {
-          const amount = event.count ?? 1;
-          if (Number.isSafeInteger(amount) && amount > 0) counts.scrolls += amount;
-        } else if (event.type === "topic") counts.topicTransitions++;
-        else if (event.type === "like-attempt") counts.likeAttempts++;
-      } catch {
-        // Ignore ordinary website logs and malformed messages.
-      }
-    };
     const onResponse = (response) => {
       if (page !== getPage()) return;
       try {
@@ -77,9 +64,8 @@ export function createReaderMonitor({
         // A response can outlive its frame; it cannot prove a successful like.
       }
     };
-    page.on("console", onConsole);
     page.on("response", onResponse);
-    attached.set(page, { console: onConsole, response: onResponse });
+    attached.set(page, { response: onResponse });
     return api;
   }
 
@@ -94,7 +80,7 @@ export function createReaderMonitor({
         })),
         new Promise((_, reject) => {
           timeout = schedule(() => reject(new Error("阅读页面响应超时")), 15000);
-          evaluationTimers.add(timeout);
+          evaluationTimers.set(timeout, reject);
         }),
       ]);
     } finally {
@@ -103,6 +89,33 @@ export function createReaderMonitor({
         evaluationTimers.delete(timeout);
       }
     }
+  }
+
+  function collect(state) {
+    // The real-browser transport deliberately skips Runtime.enable, so CDP
+    // console events are absent even while the page scrolls and navigates.
+    // These counters persist across documents and must be sampled, not summed.
+    for (const key of ["documents", "scrolls", "topicTransitions", "likeAttempts"]) {
+      const value = state?.status?.counters?.[key];
+      if (Number.isSafeInteger(value) && value >= 0) counts[key] = Math.max(counts[key], value);
+    }
+  }
+
+  async function sample() {
+    if (stopped) return summary();
+    const page = getPage();
+    if (!page || page.isClosed() || !browser.connected) return summary();
+    let state;
+    try {
+      state = await readState(page);
+    } catch (error) {
+      if (stopped) return summary();
+      if (!/execution context was destroyed|cannot find context|context.*not found|net::ERR_ABORTED/i.test(error.message)) throw error;
+      await verify(page, 15000);
+      state = await readState(page);
+    }
+    if (!stopped && page === getPage()) collect(state);
+    return summary();
   }
 
   async function fail(error) {
@@ -141,6 +154,7 @@ export function createReaderMonitor({
       if (!state?.injected || !state.status?.started || state.read !== "true") {
         throw new Error("阅读脚本未运行或阅读状态已停止");
       }
+      collect(state);
       const status = state.status;
       if (status.error) {
         const message = typeof status.error === "string" ? status.error : status.error.message || "未知错误";
@@ -167,6 +181,6 @@ export function createReaderMonitor({
     return api;
   }
 
-  const api = { attach, start, stop, summary };
+  const api = { attach, start, stop, sample, summary };
   return api;
 }

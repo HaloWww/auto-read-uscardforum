@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node bypasscf.js",
-    "test": "node --test src/accounts.test.js src/account_runner.test.js src/discourse_login.test.js src/reader_session.test.js src/reader_monitor.test.js src/reading_scripts.test.js src/reader_end_to_end.test.js"
+    "test": "node --test src/accounts.test.js src/account_runner.test.js src/discourse_login.test.js src/reader_session.test.js src/reader_monitor.test.js src/reading_scripts.test.js src/reader_end_to_end.test.js src/reading_evidence.test.js"
   },
   "dependencies": {
     "puppeteer-real-browser": "^1.2.31"

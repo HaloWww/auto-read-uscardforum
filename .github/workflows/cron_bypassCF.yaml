@@ -8,7 +8,7 @@ on:
       run_time_minutes:
         description: '正式阅读总时长（分钟）'
         type: number
-        default: 3
+        default: 100
 
 concurrency:
   group: forum-reading-${{ github.repository }}
@@ -20,17 +20,17 @@ permissions:
 jobs:
   run:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 120
     env:
       USERNAMES: ${{ secrets.USERNAMES }}
       PASSWORDS: ${{ secrets.PASSWORDS }}
       WEBSITE: ${{ secrets.WEBSITE || 'https://www.uscardforum.com' }}
-      RUN_TIME_LIMIT_MINUTES: '3'
-      MAX_CONCURRENT_ACCOUNTS: '1'
+      RUN_TIME_LIMIT_MINUTES: ${{ inputs.run_time_minutes || secrets.RUN_TIME_LIMIT_MINUTES || '100' }}
+      MAX_CONCURRENT_ACCOUNTS: ${{ secrets.MAX_CONCURRENT_ACCOUNTS || '3' }}
       NAV_TIMEOUT_MS: ${{ secrets.NAV_TIMEOUT_MS || '60000' }}
       LIKE_SPECIFIC_USER: 'false'
       SPECIFIC_USER: ${{ secrets.SPECIFIC_USER || 'halowang' }}
-      AUTO_LIKE: 'false'
+      AUTO_LIKE: ${{ secrets.AUTO_LIKE || 'true' }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       PROXY_URL: ${{ secrets.PROXY_URL }}
@@ -46,4 +46,4 @@ jobs:
           node-version: '20'
           cache: npm
       - run: npm ci --omit=dev
-      - run: node diagnostic_reading.js
+      - run: npm start

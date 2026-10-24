@@ -5,14 +5,14 @@ on:
     - cron: '30 9 * * 6'
   workflow_dispatch:
     inputs:
-      login_only:
-        description: '仅验证全部账号登录'
-        type: boolean
-        default: false
-      verify_reading:
-        description: '验证登录及阅读初始化，不点赞或发送通知'
-        type: boolean
-        default: false
+      run_time_minutes:
+        description: '正式阅读总时长（分钟）'
+        type: number
+        default: 20
+
+concurrency:
+  group: forum-reading-${{ github.repository }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -20,16 +20,14 @@ permissions:
 jobs:
   run:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       USERNAMES: ${{ secrets.USERNAMES }}
       PASSWORDS: ${{ secrets.PASSWORDS }}
       WEBSITE: ${{ secrets.WEBSITE || 'https://www.uscardforum.com' }}
-      RUN_TIME_LIMIT_MINUTES: '20'
+      RUN_TIME_LIMIT_MINUTES: ${{ inputs.run_time_minutes || '20' }}
       MAX_CONCURRENT_ACCOUNTS: ${{ secrets.MAX_CONCURRENT_ACCOUNTS || '3' }}
       NAV_TIMEOUT_MS: ${{ secrets.NAV_TIMEOUT_MS || '60000' }}
-      LOGIN_ONLY: ${{ inputs.login_only || false }}
-      VERIFY_READING: ${{ inputs.verify_reading || false }}
       LIKE_SPECIFIC_USER: 'true'
       SPECIFIC_USER: ${{ secrets.SPECIFIC_USER || 'halowang' }}
       AUTO_LIKE: ${{ secrets.AUTO_LIKE || 'true' }}

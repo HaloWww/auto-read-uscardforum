@@ -32,13 +32,21 @@ export async function verifyReader(page, timeout = 60000) {
   while (Date.now() < deadline) {
     if (page.isClosed()) throw new Error("Target closed during reading initialization");
     try {
-      if (await isLoggedIn(page) && await page.evaluate(() => window.__autoInjected === true)) return;
+      if (await isLoggedIn(page)) {
+        const state = await page.evaluate(() => ({
+          started: window.__autoInjected === true && window.__autoReadStatus?.started === true &&
+            localStorage.getItem("read") === "true",
+          error: window.__autoReadStatus?.error,
+        }));
+        if (state.error) throw new Error(`阅读循环失败：${state.error}`);
+        if (state.started) return;
+      }
     } catch (error) {
       if (!navigationChanged(error)) throw error;
     }
     await sleep(200);
   }
-  throw new Error("阅读初始化超时：未确认登录状态或脚本注入");
+  throw new Error("阅读初始化超时：未确认登录状态或阅读循环启动");
 }
 
 export async function startReader(page, {

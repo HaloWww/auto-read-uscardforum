@@ -34,6 +34,7 @@ after(async () => {
 
 const source = `if (!window.__autoInjected) {
   window.__autoInjected = true;
+  window.__autoReadStatus = { started: true, lastTickAt: Date.now(), phase: "reading", retryAt: 0 };
   window.__readerInstallCount = (window.__readerInstallCount || 0) + 1;
 }`;
 const authenticated = '<header class="d-header"><button id="current-user">Fixture account</button></header>';
@@ -197,6 +198,21 @@ test("ordinary configuration errors are reported without a recovery attempt", { 
   assert.equal(recoveries, 0);
   assert.equal(fixture.state.submissions, 1);
   assert.equal(fixture.state.topicRequests, 0);
+});
+
+test("an injection marker alone cannot pass reading initialization", { timeout: 20000 }, async (t) => {
+  const fixture = await forum(t);
+  await assert.rejects(startReader(fixture.page, {
+    source: "window.__autoInjected = true;", topicUrl: fixture.topicUrl, timeout: 400,
+  }), /未确认登录状态或阅读循环启动/);
+});
+
+test("a failed reading loop cannot pass initialization with a fresh heartbeat", { timeout: 20000 }, async (t) => {
+  const fixture = await forum(t);
+  await assert.rejects(startReader(fixture.page, {
+    source: `${source}; window.__autoReadStatus.error = 'fixture scroll failed';`,
+    topicUrl: fixture.topicUrl, timeout: 3000,
+  }), /阅读循环失败：fixture scroll failed/);
 });
 
 test("a disconnected browser fails explicitly instead of retrying account login", { timeout: 20000 }, async (t) => {

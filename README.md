@@ -18,7 +18,7 @@
 | Secret | 默认值 / 说明 |
 | --- | --- |
 | `WEBSITE` | `https://www.uscardforum.com` |
-| `RUN_TIME_LIMIT_MINUTES` | `20`，readLike 全部账号的总运行时间，按批次分配 |
+| `RUN_TIME_LIMIT_MINUTES` | `100`，readLike 全部账号的总运行时间，按批次分配 |
 | `MAX_CONCURRENT_ACCOUNTS` | `3`，每批同时运行的账号数 |
 | `NAV_TIMEOUT_MS` | `60000`，导航和登录等待超时（毫秒） |
 | `SPECIFIC_USER` | `halowang`，likeUser 任务的点赞对象 |
@@ -36,12 +36,13 @@
 
 在 **Actions** 中启用工作流，然后选择任务并点击 **Run workflow**：
 
-- **readLike**：每日自动阅读并随机点赞。
+- **readLike**：每日自动阅读并随机点赞，默认总时长 100 分钟。
 - **likeUser**：北京时间周六运行 20 分钟，阅读并给 `SPECIFIC_USER` 点赞。
-- 手动运行时勾选 **login_only**：只检查全部账号能否登录，完成后关闭浏览器；不阅读、点赞或发送 Telegram 通知。
-- 勾选 **verify_reading**：验证全部账号的登录、阅读脚本初始化及页面响应后退出，不点赞或发送通知。排查登录后失败时使用此模式；`login_only` 优先。
+- 手动运行直接执行正式阅读，`run_time_minutes` 指定总时长，readLike 默认为 `100`。不再提供短验证开关。
 
 账号失败会在日志中标明序号并使本次运行失败，其他账号继续执行。
+
+每分钟检查页面和阅读循环，并记录实际换帖、滚动、点赞请求及成功响应。达到点赞上限只停止点赞，阅读继续；两个阅读任务共用并发组，避免同一组账号同时运行。
 
 **Update Workflow Cron** 会将启动时间随机设在北京时间 07:00–23:59，需额外设置具有仓库内容和工作流写入权限的 `PAT_TOKEN`。不配置时，可使用阅读任务自身的固定计划或手动运行。
 

@@ -4,23 +4,46 @@
   window.__autoInjected = true;
 
   function initialize() {
+    const specific = true;
     const baseUrl = window.location.origin;
     const specificUser = localStorage.getItem("specificUser") || "halowang";
-    const postListLimit = 100;
-    const likeLimit = 1;
-    let nextPostTimer = null;
-    let openingPost = false;
+    const queueKey = specific ? "specificUserPostList" : "topicList";
+    const likeLimit = specific ? 1 : 9;
+    const resetAfter = specific ? 43200000 : 86400000;
     let clickCounter = Number(localStorage.getItem("clickCounter")) || 0;
-    const now = Date.now();
-    if (now - (Number(localStorage.getItem("clickCounterTimestamp")) || 0) > 43200000) {
+    if (Date.now() - (Number(localStorage.getItem("clickCounterTimestamp")) || 0) > resetAfter) {
       clickCounter = 0;
       localStorage.setItem("clickCounter", "0");
-      localStorage.setItem("clickCounterTimestamp", String(now));
+      localStorage.setItem("clickCounterTimestamp", String(Date.now()));
+    }
+    const status = window.__autoReadStatus = {
+      started: true, startedAt: Date.now(), lastTickAt: Date.now(), phase: "reading", retryAt: 0, error: null,
+    };
+    const emit = (type) => console.log("[auto-read]", JSON.stringify({ type }));
+    const isReading = () => localStorage.getItem("read") === "true";
+    const retryAt = () => Number(localStorage.getItem("autoReadRetryAfter")) || 0;
+    const canLike = () => isReading() && Date.now() >= retryAt() &&
+      localStorage.getItem("autoLikeEnabled") !== "false" && clickCounter < likeLimit;
+    const considered = new WeakSet();
+    const attempted = new Set();
+    let opening = false;
+    let bottomSince = null;
+    let lastHeight = 0;
+    let scrollSteps = 0;
+    let nextLikeAt = 0;
+
+    function readQueue() {
+      try {
+        const value = JSON.parse(localStorage.getItem(queueKey) || "[]");
+        return Array.isArray(value) ? value : [];
+      } catch { return []; }
     }
 
-    const isReading = () => localStorage.getItem("read") === "true";
-    const canLike = () => isReading() && localStorage.getItem("autoLikeEnabled") !== "false";
-    const retryAt = () => Number(localStorage.getItem("autoReadRetryAfter")) || 0;
+    function cooldown(until) {
+      localStorage.setItem("autoReadRetryAfter", String(until));
+      status.phase = "cooldown";
+      status.retryAt = until;
+    }
 
     async function requestTopicData(url) {
       const controller = new AbortController();
@@ -28,118 +51,163 @@
       let retryAfter = 0;
       try {
         const response = await fetch(url, {
-          headers: { Accept: "application/json" },
-          credentials: "same-origin",
-          signal: controller.signal,
+          headers: { Accept: "application/json" }, credentials: "same-origin", signal: controller.signal,
         });
         if (response.status === 429) {
           const value = response.headers.get("Retry-After");
           retryAfter = /^\d+$/.test(value || "")
-            ? Number(value) * 1000
-            : Math.max(0, Date.parse(value) - Date.now()) || 0;
+            ? Number(value) * 1000 : Math.max(0, Date.parse(value) - Date.now()) || 0;
           localStorage.setItem("autoLikeEnabled", "false");
+          localStorage.setItem("autoReadLikesPaused", "true");
         }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const result = await response.json();
         localStorage.removeItem("autoReadFetchFailures");
+        localStorage.removeItem("autoReadRetryAfter");
         return result;
       } catch (error) {
         const failures = Math.min(5, (Number(localStorage.getItem("autoReadFetchFailures")) || 0) + 1);
         const wait = Math.max(retryAfter, Math.min(900000, 60000 * 2 ** (failures - 1)));
         localStorage.setItem("autoReadFetchFailures", String(failures));
-        localStorage.setItem("autoReadRetryAfter", String(Date.now() + wait));
+        cooldown(Date.now() + wait);
         console.warn(`读取帖子列表失败 (${error.message})，${Math.ceil(wait / 1000)} 秒后重试`);
         return null;
-      } finally {
-        clearTimeout(timeout);
-      }
+      } finally { clearTimeout(timeout); }
     }
 
-    async function getLatestTopic() {
-      const posts = [];
+    async function fillQueue() {
+      const items = [];
       const seen = new Set();
+      const firstPage = specific ? 1 : 0;
+      const lastPage = specific ? 5 : 9;
+      const limit = specific ? 100 : 200;
       const query = encodeURIComponent(`@${specificUser} order:latest`);
-      for (let page = 1; page <= 5 && posts.length < postListLimit; page++) {
-        if (!isReading()) break;
-        if (page > 1) await new Promise((resolve) => setTimeout(resolve, 1000));
-        if (!isReading()) break;
-        const result = await requestTopicData(`${baseUrl}/search?q=${query}&page=${page}`);
-        if (!Array.isArray(result?.posts) || result.posts.length === 0) break;
-        let newPosts = 0;
-        for (const post of result.posts) {
-          const key = `${post.topic_id}/${post.post_number}`;
-          if (!post.topic_id || !post.post_number || seen.has(key)) continue;
+      for (let page = firstPage; page <= lastPage && items.length < limit; page++) {
+        if (!isReading() || Date.now() < retryAt()) break;
+        if (page > firstPage) await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (!isReading() || Date.now() < retryAt()) break;
+        const path = specific ? `/search?q=${query}&page=${page}` : `/latest.json?no_definitions=true&page=${page}`;
+        const result = await requestTopicData(`${baseUrl}${path}`);
+        const values = specific ? result?.posts : result?.topic_list?.topics;
+        if (!Array.isArray(values) || values.length === 0) break;
+        let added = 0;
+        for (const item of values) {
+          const key = specific ? `${item.topic_id}/${item.post_number}` : item.id;
+          if (!key || (specific && (!item.topic_id || !item.post_number)) || seen.has(key)) continue;
           seen.add(key);
-          newPosts++;
-          posts.push({ topic_id: post.topic_id, post_number: post.post_number });
+          added++;
+          if (specific) items.push({ topic_id: item.topic_id, post_number: item.post_number });
+          else if ((Number(item.posts_count) || 0) < 2000) items.push(item);
         }
-        if (newPosts === 0) break;
+        if (!added) break;
       }
-      localStorage.setItem("specificUserPostList", JSON.stringify(posts.slice(0, postListLimit)));
+      localStorage.setItem(queueKey, JSON.stringify(items.slice(0, limit)));
+      return items.slice(0, limit);
     }
 
-    async function openSpecificUserPost() {
-      if (openingPost || !isReading()) return;
-      openingPost = true;
+    async function openNext() {
+      if (opening || !isReading() || Date.now() < retryAt()) return;
+      opening = true;
+      status.phase = "fetching";
       try {
-        let posts = JSON.parse(localStorage.getItem("specificUserPostList") || "[]");
-        if (posts.length === 0 && Date.now() >= retryAt()) {
-          await getLatestTopic();
-          posts = JSON.parse(localStorage.getItem("specificUserPostList") || "[]");
-        }
-        if (!isReading()) return;
-        if (posts.length > 0 && Date.now() >= retryAt()) {
-          const post = posts.shift();
-          localStorage.setItem("specificUserPostList", JSON.stringify(posts));
-          window.location.href = `${baseUrl}/t/topic/${post.topic_id}/${post.post_number}`;
+        let items = readQueue();
+        if (!items.length) items = await fillQueue();
+        if (!isReading() || Date.now() < retryAt()) return;
+        if (!items.length) { cooldown(Date.now() + 60000); return; }
+        const item = items.shift();
+        localStorage.setItem(queueKey, JSON.stringify(items));
+        let path;
+        if (specific) {
+          localStorage.setItem("autoReadSpecificTarget", JSON.stringify(item));
+          path = `/t/topic/${item.topic_id}/${item.post_number}`;
         } else {
-          if (nextPostTimer !== null) clearTimeout(nextPostTimer);
-          nextPostTimer = setTimeout(openSpecificUserPost, Math.max(60000, retryAt() - Date.now()));
+          localStorage.setItem("justOpenedNewTopic", "true");
+          path = `/t/topic/${item.id}${item.last_read_post_number ? `/${item.last_read_post_number}` : ""}`;
         }
-      } finally {
-        openingPost = false;
-      }
+        emit("topic");
+        window.location.href = `${baseUrl}${path}`;
+      } catch (error) {
+        status.error = error.message;
+        console.error("自动阅读跳转失败：", error.message);
+        cooldown(Date.now() + 60000);
+      } finally { opening = false; }
     }
 
-    function likeSpecificPost() {
+    function specificButton() {
+      let target;
+      try { target = JSON.parse(localStorage.getItem("autoReadSpecificTarget") || "null"); } catch { return null; }
+      // The seed topic can belong to somebody else. Only searched posts are
+      // eligible, and post-number matching must not confuse #1 with #10.
+      const parts = window.location.pathname.split("/").filter(Boolean);
+      const topicId = Number(/^\d+$/.test(parts[1] || "") ? parts[1] : parts[2]);
+      if (!target || topicId !== Number(target.topic_id)) return null;
+      const number = Number(target.post_number);
+      const article = document.querySelector?.(`#post_${number}, [data-post-number="${number}"]`);
+      if (article) return article.querySelector(".discourse-reactions-reaction-button");
+      const exact = new RegExp(`(?:^|\\s)#${number}(?!\\d)`);
+      const anchor = Array.from(document.querySelectorAll("button[aria-label]")).find((button) =>
+        exact.test(button.getAttribute("aria-label") || ""));
+      return anchor?.parentElement.querySelector(".discourse-reactions-reaction-button") || null;
+    }
+
+    function scanLikes() {
       if (!canLike()) return;
-      const lastPart = window.location.pathname.split("/").pop();
-      let reactionButton;
-      if (Number(lastPart) < 10000) {
-        let target;
-        document.querySelectorAll("button[aria-label]").forEach((button) => {
-          if (button.getAttribute("aria-label")?.includes(`#${lastPart}`)) target = button;
-        });
-        reactionButton = target?.parentElement.querySelector(".discourse-reactions-reaction-button");
-      } else {
-        reactionButton = document.querySelectorAll(".discourse-reactions-reaction-button")[0];
+      const buttons = specific ? [specificButton()].filter(Boolean)
+        : Array.from(document.querySelectorAll(".discourse-reactions-reaction-button"));
+      for (const button of buttons) {
+        if (!canLike()) break;
+        if (considered.has(button) || !["点赞此帖子", "Like this post"].includes(button.title)) continue;
+        considered.add(button);
+        if (!specific && Math.random() > 0.3) continue;
+        const post = button.closest?.("article");
+        const key = specific ? localStorage.getItem("autoReadSpecificTarget")
+          : post?.getAttribute?.("data-post-id") || post?.id || null;
+        if (key && attempted.has(key)) continue;
+        const due = specific ? Date.now() : Math.max(Date.now() + 2000 + Math.floor(Math.random() * 3000), nextLikeAt);
+        nextLikeAt = due + 2000;
+        const dispatch = () => {
+          if (!canLike() || button.isConnected === false || (key && attempted.has(key)) ||
+              !["点赞此帖子", "Like this post"].includes(button.title)) return;
+          if (key) attempted.add(key);
+          emit("like-attempt");
+          button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+          clickCounter++;
+          localStorage.setItem("clickCounter", String(clickCounter));
+          if (clickCounter >= likeLimit) localStorage.setItem("autoLikeEnabled", "false");
+        };
+        if (due <= Date.now()) dispatch();
+        else setTimeout(dispatch, due - Date.now());
       }
-      if (!reactionButton || !["点赞此帖子", "Like this post"].includes(reactionButton.title)) return;
-      if (clickCounter >= likeLimit) {
-        localStorage.setItem("read", "false");
-        return;
-      }
-      if (!canLike()) return;
-      reactionButton.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-      clickCounter++;
-      localStorage.setItem("clickCounter", String(clickCounter));
-      if (clickCounter >= likeLimit) localStorage.setItem("read", "false");
     }
 
-    function startReading() {
-      if (!isReading()) return;
-      nextPostTimer = setTimeout(async () => {
-        if (!isReading()) return;
-        likeSpecificPost();
-        if (isReading()) await openSpecificUserPost();
-      }, 2000);
+    function tick() {
+      status.lastTickAt = Date.now();
+      status.retryAt = retryAt();
+      status.phase = status.retryAt > Date.now() ? "cooldown" : opening ? "fetching" : "reading";
+      try {
+        if (!isReading() || status.phase === "cooldown" || opening) return;
+        scanLikes();
+        const before = window.scrollY;
+        window.scrollBy(0, 200);
+        if (window.scrollY !== before && (++scrollSteps === 1 || scrollSteps % 20 === 0)) emit("scroll");
+        const height = Math.max(document.body?.offsetHeight || 0, document.body?.scrollHeight || 0,
+          document.documentElement?.scrollHeight || 0);
+        const atBottom = window.innerHeight + window.scrollY >= height - 100;
+        if (atBottom && height === lastHeight && window.scrollY === before) bottomSince ??= Date.now();
+        else bottomSince = null;
+        lastHeight = height;
+        if (bottomSince !== null && Date.now() - bottomSince >= 3000) void openNext();
+      } catch (error) {
+        status.error = error.message;
+        console.error("自动阅读循环失败：", error.message);
+      } finally { setTimeout(tick, 1000); }
     }
 
-    if (document.readyState === "complete") startReading();
-    else window.addEventListener("load", startReading, { once: true });
+    emit("started");
+    tick();
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initialize, { once: true });
-  } else initialize();
+  // DOM readiness is enough. Ads or images can keep window.load pending forever.
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, { once: true });
+  else initialize();
 })();

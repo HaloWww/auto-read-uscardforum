@@ -25,7 +25,6 @@ export async function runAccountBatches(
     launch,
     close = async (value) => value.close(),
     delayBetweenInstances = 10000,
-    keepAlive = true,
     now = Date.now,
     sleep = sleepFor,
     onBatch = () => {},
@@ -84,7 +83,7 @@ export async function runAccountBatches(
       // The final batch gets its reading time too. Login time is already spent
       // from this slot, rather than being added to every batch's reading time.
       const remaining = deadline - now();
-      if (keepAlive && active.length && remaining > 0) await sleep(remaining);
+      if (active.length && remaining > 0) await sleep(remaining);
     } finally {
       for (const result of active) {
         try {

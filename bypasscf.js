@@ -4,22 +4,22 @@ import { parseAccounts, positiveInteger } from "./src/accounts.js";
 import { loginDiscourse } from "./src/discourse_login.js";
 import { runAccountBatches } from "./src/account_runner.js";
 import { getProxyConfig, getPuppeteerProxyArgs } from "./src/proxy_config.js";
-import { startReader, pauseLikes, verifyReader } from "./src/reader_session.js";
+import { startReader, pauseLikes } from "./src/reader_session.js";
+import { createReaderMonitor } from "./src/reader_monitor.js";
 
 const accounts = parseAccounts(process.env.USERNAMES, process.env.PASSWORDS);
-const runTimeMillis = positiveInteger(process.env.RUN_TIME_LIMIT_MINUTES, 20, "RUN_TIME_LIMIT_MINUTES") * 60000;
+const runTimeMillis = positiveInteger(process.env.RUN_TIME_LIMIT_MINUTES, 100, "RUN_TIME_LIMIT_MINUTES") * 60000;
 const maxConcurrentAccounts = positiveInteger(process.env.MAX_CONCURRENT_ACCOUNTS, 3, "MAX_CONCURRENT_ACCOUNTS");
 const navigationTimeout = positiveInteger(process.env.NAV_TIMEOUT_MS, 60000, "NAV_TIMEOUT_MS");
 const loginUrl = new URL(process.env.WEBSITE || "https://www.uscardforum.com").origin;
-const loginOnly = process.env.LOGIN_ONLY === "true";
-const verifyReading = !loginOnly && process.env.VERIFY_READING === "true";
-const autoLike = !verifyReading && process.env.AUTO_LIKE !== "false";
+const autoLike = process.env.AUTO_LIKE !== "false";
 const specificUser = process.env.SPECIFIC_USER || "halowang";
 const scriptName = process.env.LIKE_SPECIFIC_USER === "true" ? "index_likeUser.js" : "index.js";
-const script = loginOnly ? "" : readFileSync(new URL(scriptName, import.meta.url), "utf8");
+const script = readFileSync(new URL(scriptName, import.meta.url), "utf8");
 const proxyConfig = getProxyConfig();
 const activeBrowsers = new Set();
 const runtimeErrors = new Map();
+const monitors = new Map();
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 for (const event of ["unhandledRejection", "uncaughtException"]) {
@@ -32,7 +32,7 @@ for (const event of ["unhandledRejection", "uncaughtException"]) {
 async function notify(message) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (loginOnly || verifyReading || !token || !chatId) return;
+  if (!token || !chatId) return;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -52,6 +52,15 @@ async function notify(message) {
 
 async function closeBrowser(browser) {
   if (!browser) return;
+  const monitor = monitors.get(browser);
+  if (monitor) {
+    monitor.stop();
+    const progress = monitor.summary();
+    if (!runtimeErrors.has(browser) && (!progress.documents || progress.scrolls + progress.topicTransitions === 0)) {
+      runtimeErrors.set(browser, new Error("运行期间没有确认到实际滚动或换帖"));
+    }
+    monitors.delete(browser);
+  }
   activeBrowsers.delete(browser);
   let timer;
   try {
@@ -113,8 +122,15 @@ async function launchAccount({ username, password }, index) {
       onRetry: (attempt, error) => console.warn(`${label}：登录重试 ${attempt}/2：${error.message}`),
     });
     console.log(`${label}：已验证当前用户菜单，登录成功`);
-    if (loginOnly) return browser;
-
+    const monitor = createReaderMonitor({
+      label, browser, getPage: () => page,
+      onFailure: (error) => {
+        runtimeErrors.set(browser, error);
+        console.error(`${label}：持续阅读检查失败：${error.message}`);
+        void closeBrowser(browser).catch((closeError) => console.warn(`${label}：${closeError.message}`));
+      },
+    });
+    monitors.set(browser, monitor);
     let rateLimited = false;
     const onResponse = (response) => {
       if (rateLimited || response.status() !== 429 || new URL(response.url()).origin !== loginUrl) return;
@@ -130,17 +146,13 @@ async function launchAccount({ username, password }, index) {
         if (targetPage !== page) await configurePage(targetPage);
         page = targetPage;
         targetPage.on("response", onResponse);
+        monitor.attach(targetPage);
       },
       onRecovery: (error) => console.warn(`${label}：阅读页面会话失效，保留登录状态恢复一次：${error.message}`),
     });
     page = reader.page;
     console.log(`${label}：阅读脚本初始化成功`);
-    if (verifyReading) {
-      await sleep(5000);
-      // Re-evaluate after scripts and page navigation have had time to run.
-      await verifyReader(page, navigationTimeout);
-      console.log(`${label}：阅读页面响应验证通过`);
-    }
+    monitor.start();
     await notify(`${label} 登录成功`);
     return browser;
   } catch (error) {
@@ -151,14 +163,15 @@ async function launchAccount({ username, password }, index) {
   }
 }
 
-console.log(`运行 ${accounts.length} 个账号，并发 ${maxConcurrentAccounts}，总预算 ${runTimeMillis / 60000} 分钟`);
+console.log(`正式阅读：${accounts.length} 个账号，并发 ${maxConcurrentAccounts}，总时长 ${runTimeMillis / 60000} 分钟 (${runTimeMillis}ms)`);
+console.log(`计划结束时间：${new Date(Date.now() + runTimeMillis).toISOString()}`);
 const watchdog = setTimeout(() => {
   console.error("运行预算及清理宽限期已耗尽");
   process.exit(1);
 }, runTimeMillis + 120000);
 try {
   const results = await runAccountBatches(accounts, {
-    maxConcurrentAccounts, runTimeMillis, keepAlive: !loginOnly && !verifyReading,
+    maxConcurrentAccounts, runTimeMillis,
     launch: launchAccount, close: closeBrowser,
     onBatch: ({ startIndex, endIndex }) => console.log(`当前批次：${startIndex + 1} - ${endIndex}`),
   });

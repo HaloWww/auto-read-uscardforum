@@ -5,347 +5,354 @@ import vm from "node:vm";
 
 const scripts = ["index.js", "index_likeUser.js"];
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+const response = (data = {}, status = 200, retryAfter = null) => ({
+  ok: status >= 200 && status < 300, status,
+  headers: { get: () => retryAfter }, json: async () => data,
+});
+const itemsFor = (script) => script === "index.js"
+  ? { topic_list: { topics: [{ id: 123, posts_count: 5 }] } }
+  : { posts: [{ topic_id: 123, post_number: 4 }] };
 
-// Execute each injected script with a browser-like document and a controlled clock.
-// No forum account, navigation, or external network access is needed for these cases.
+// Real timer ordering and clamped scrolling, without an external forum or a
+// wall-clock wait. Navigation ends this document just as it does in a browser.
 function browser(script, {
-  readyState = "complete", reading = true, fetch, storage, querySelectorAll, random,
-  url = "https://www.uscardforum.com/t/topic/438315/1",
+  readyState = "complete", height = 100, fetch, querySelectorAll = () => [],
+  storage, target = true, url = "https://www.uscardforum.com/t/topic/438315/1", random = () => 0,
 } = {}) {
   let now = 0;
   let nextTimer = 0;
+  let contentHeight = height;
+  let currentUrl = url;
   const timers = new Map();
   const errors = [];
   const requests = [];
-  const values = new Map(Object.entries({
-    read: String(reading), autoLikeEnabled: "false",
-  }));
+  const events = [];
+  const navigations = [];
+  const values = new Map(Object.entries({ read: "true", autoLikeEnabled: "false" }));
   const localStorage = storage || {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, String(value)),
     removeItem: (key) => values.delete(key),
   };
-  const eventTarget = () => {
-    const listeners = new Map();
-    return {
-      addEventListener(type, callback, options = {}) {
-        const entries = listeners.get(type) || [];
-        entries.push({ callback, once: options.once });
-        listeners.set(type, entries);
-      },
-      dispatch(type) {
-        const entries = listeners.get(type) || [];
-        listeners.set(type, entries.filter((entry) => !entry.once));
-        for (const { callback } of entries) callback();
-      },
-      listeners,
-    };
-  };
-  const body = { offsetHeight: 100 };
+  if (target) localStorage.setItem("autoReadSpecificTarget", JSON.stringify({ topic_id: 438315, post_number: 1 }));
+  const listeners = new Map();
+  const body = {};
+  Object.defineProperty(body, "offsetHeight", { get: () => contentHeight });
+  Object.defineProperty(body, "scrollHeight", { get: () => contentHeight });
   const document = {
-    ...eventTarget(), readyState, body: readyState === "loading" ? null : body,
-    querySelectorAll: querySelectorAll || (() => []),
+    readyState, body: readyState === "loading" ? null : body,
+    documentElement: body, querySelectorAll,
+    addEventListener(type, callback) {
+      const existing = listeners.get(type) || [];
+      existing.push(callback);
+      listeners.set(type, existing);
+    },
   };
-  const initialUrl = url;
-  const location = new URL(url);
   const window = {
-    ...eventTarget(), location: { href: initialUrl, pathname: location.pathname, origin: location.origin },
-    innerHeight: 800, scrollY: 0, scrollBy() {},
+    innerHeight: 800, scrollY: 0,
+    scrollBy(x, y) { this.scrollY = Math.min(Math.max(0, contentHeight - this.innerHeight), this.scrollY + y); },
+    addEventListener() { throw new Error("reader must not depend on window.load"); },
+    location: {
+      get href() { return currentUrl; },
+      set href(value) { currentUrl = value; navigations.push(value); },
+      get pathname() { return new URL(currentUrl).pathname; },
+      get origin() { return new URL(currentUrl).origin; },
+    },
   };
   const setTimeout = (callback, delay = 0) => {
     const id = ++nextTimer;
     timers.set(id, { callback, due: now + Number(delay) });
     return id;
   };
-  class ClockDate extends Date {
-    static now() { return now; }
-  }
+  class ClockDate extends Date { static now() { return now; } }
   const context = vm.createContext({
     window, document, localStorage, Date: ClockDate, AbortController,
-    Math: random ? Object.assign(Object.create(Math), { random }) : Math,
+    Math: Object.assign(Object.create(Math), { random }),
     MouseEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
-    console: { log() {}, warn() {}, error() {} },
+    console: {
+      log: (tag, json) => { if (tag === "[auto-read]") events.push(JSON.parse(json)); },
+      warn() {}, error: (...args) => errors.push(args.map(String).join(" ")),
+    },
     setTimeout, clearTimeout: (id) => timers.delete(id),
-    setInterval: () => ++nextTimer, clearInterval() {},
-    fetch: async (url, options) => {
-      requests.push(String(url));
-      return fetch ? fetch(url, options) : response({});
+    fetch: async (requestUrl, options) => {
+      requests.push(String(requestUrl));
+      return fetch ? fetch(requestUrl, options) : response();
     },
   });
   const source = readFileSync(new URL(`../${script}`, import.meta.url), "utf8");
-  const inject = () => vm.runInContext(source, context, { timeout: 1000 });
-  const advance = async (milliseconds) => {
-    const end = now + milliseconds;
-    for (let iterations = 0; iterations < 1000; iterations++) {
-      await flush();
-      const [id, timer] = [...timers.entries()]
-        .filter(([, entry]) => entry.due <= end)
-        .sort((a, b) => a[1].due - b[1].due)[0] || [];
-      if (!timer) { now = end; await flush(); return; }
-      now = timer.due;
-      timers.delete(id);
-      try {
-        const result = timer.callback();
-        if (result?.catch) result.catch((error) => errors.push(error));
-      } catch (error) { errors.push(error); }
-    }
-    throw new Error("Timer loop failed to yield");
-  };
   return {
-    inject, advance, requests, localStorage, window, document, errors,
-    get now() { return now; },
-    finishLoading() {
+    inject: () => vm.runInContext(source, context, { timeout: 1000 }),
+    async advance(milliseconds) {
+      const end = now + milliseconds;
+      for (let iterations = 0; iterations < 50000; iterations++) {
+        await flush();
+        if (navigations.length) { now = end; return; }
+        const [id, timer] = [...timers.entries()].filter(([, entry]) => entry.due <= end)
+          .sort((a, b) => a[1].due - b[1].due)[0] || [];
+        if (!timer) { now = end; await flush(); return; }
+        now = timer.due;
+        timers.delete(id);
+        try {
+          const result = timer.callback();
+          if (result?.catch) result.catch((error) => errors.push(error));
+        } catch (error) { errors.push(error); }
+      }
+      throw new Error("Timer loop did not yield");
+    },
+    ready() {
       document.body = body;
       document.readyState = "interactive";
-      document.dispatch("DOMContentLoaded");
-      document.readyState = "complete";
-      window.dispatch("load");
+      for (const callback of listeners.get("DOMContentLoaded") || []) callback();
+      listeners.delete("DOMContentLoaded");
     },
-    initialUrl,
+    setHeight(value) { contentHeight = value; },
+    localStorage, document, window, requests, navigations, errors, events,
+    get now() { return now; },
+    get timerCount() { return timers.size; },
   };
 }
 
-function response(data, status = 200, retryAfter = null) {
-  return {
-    ok: status >= 200 && status < 300, status,
-    headers: { get: () => retryAfter }, json: async () => data,
-  };
+function reaction(onClick, number = 1) {
+  const button = { title: "Like this post", isConnected: true, dispatchEvent: onClick };
+  const anchor = { getAttribute: () => `Post #${number}`, parentElement: { querySelector: () => button } };
+  return { button, anchor };
 }
-
-const posts = { posts: [{ topic_id: 123, post_number: 4 }] };
-const topics = { topic_list: { topics: [{ id: 123, posts_count: 5 }] } };
 
 for (const script of scripts) {
-  test(`${script}: early and duplicate injection initializes once when the body exists`, async () => {
+  test(`${script}: DOMContentLoaded starts once without waiting for window.load`, async () => {
     const page = browser(script, { readyState: "loading" });
     page.inject();
     page.inject();
-    assert.equal(page.requests.length, 0);
-    assert.equal(page.window.__autoInjected, true);
-    assert.equal(page.document.listeners.get("DOMContentLoaded").length, 1);
-    page.finishLoading();
+    assert.equal(page.window.__autoReadStatus, undefined);
+    page.ready();
     page.inject();
-    await page.advance(2000);
+    await page.advance(6000);
+    assert.equal(page.events.filter(({ type }) => type === "started").length, 1);
+    assert.equal(page.window.__autoReadStatus.started, true);
+    assert.equal(page.window.__autoReadStatus.lastTickAt, 6000);
     assert.equal(page.requests.length, 1);
     assert.deepEqual(page.errors, []);
   });
 
-  test(`${script}: late injection starts and 429 honors Retry-After without a request storm`, async () => {
+  test(`${script}: late content growth prevents leaving a false bottom and produces real scroll activity`, async () => {
+    const page = browser(script);
+    page.inject();
+    await page.advance(2500);
+    assert.equal(page.navigations.length, 0);
+    page.setHeight(20000);
+    await page.advance(10000);
+    assert.ok(page.window.scrollY >= 1800);
+    assert.ok(page.events.some(({ type }) => type === "scroll"));
+    assert.equal(page.requests.length, 0);
+    assert.equal(page.navigations.length, 0);
+    assert.deepEqual(page.errors, []);
+  });
+
+  test(`${script}: delayed reaction rendering is scanned repeatedly but dispatched once`, async () => {
+    let clicks = 0;
+    let visible = false;
+    const { button, anchor } = reaction(() => clicks++);
+    const page = browser(script, {
+      height: 100000000,
+      querySelectorAll: () => visible ? [script === "index.js" ? button : anchor] : [],
+    });
+    page.localStorage.setItem("autoLikeEnabled", "true");
+    page.inject();
+    await page.advance(3500);
+    assert.equal(clicks, 0);
+    visible = true;
+    await page.advance(20000);
+    assert.equal(clicks, 1);
+    assert.equal(page.events.filter(({ type }) => type === "like-attempt").length, 1);
+    assert.equal(page.localStorage.getItem("read"), "true");
+    assert.deepEqual(page.errors, []);
+  });
+
+  test(`${script}: the like limit disables likes while reading and scrolling continue`, async () => {
+    let clicks = 0;
+    const targets = Array.from({ length: 20 }, () => reaction(() => clicks++));
+    const page = browser(script, {
+      height: 100000000,
+      querySelectorAll: () => targets.map((item) => script === "index.js" ? item.button : item.anchor),
+    });
+    page.localStorage.setItem("autoLikeEnabled", "true");
+    page.inject();
+    await page.advance(60000);
+    assert.equal(clicks, script === "index.js" ? 9 : 1);
+    assert.equal(page.localStorage.getItem("autoLikeEnabled"), "false");
+    assert.equal(page.localStorage.getItem("read"), "true");
+    assert.ok(page.window.scrollY > 10000);
+    assert.equal(page.window.__autoReadStatus.lastTickAt, 60000);
+    assert.deepEqual(page.errors, []);
+  });
+
+  test(`${script}: 429 honors Retry-After, persists a like pause and avoids request storms`, async () => {
     const page = browser(script, { fetch: () => response({}, 429, "120") });
     page.inject();
-    page.inject();
-    await page.advance(2000);
+    await page.advance(5000);
     assert.equal(page.requests.length, 1);
-    const retryAt = Number(page.localStorage.getItem("autoReadRetryAfter"));
-    await page.advance(retryAt - page.now - 1);
+    const deadline = Number(page.localStorage.getItem("autoReadRetryAfter"));
+    assert.equal(page.window.__autoReadStatus.phase, "cooldown");
+    assert.equal(page.window.__autoReadStatus.retryAt, deadline);
+    assert.equal(page.localStorage.getItem("autoReadLikesPaused"), "true");
+    await page.advance(deadline - page.now - 1);
     assert.equal(page.requests.length, 1);
-    await page.advance(1);
+    await page.advance(1001);
     assert.equal(page.requests.length, 2);
     assert.equal(page.localStorage.getItem("autoLikeEnabled"), "false");
     assert.deepEqual(page.errors, []);
   });
 
-  test(`${script}: an empty list waits before fetching again`, async () => {
+  test(`${script}: an empty list waits before another request`, async () => {
     const page = browser(script);
     page.inject();
-    await page.advance(2000);
+    await page.advance(5000);
     assert.equal(page.requests.length, 1);
-    await page.advance(59999 - (script === "index.js" ? 2000 : 0));
+    const deadline = Number(page.localStorage.getItem("autoReadRetryAfter"));
+    await page.advance(deadline - page.now - 1);
     assert.equal(page.requests.length, 1);
-    await page.advance(1);
+    await page.advance(1001);
     assert.equal(page.requests.length, 2);
     assert.deepEqual(page.errors, []);
   });
 
-  test(`${script}: consecutive failures back off and pause queued navigation`, async () => {
+  test(`${script}: partial queues are retained through a rate-limit cooldown`, async () => {
     let calls = 0;
-    const page = browser(script, {
-      fetch: () => {
-        calls++;
-        if (calls === 1) return response(script === "index.js" ? topics : posts);
-        return response({}, 429);
-      },
-    });
+    const page = browser(script, { fetch: () => ++calls === 1 ? response(itemsFor(script)) : response({}, 429) });
     page.inject();
     await page.advance(10000);
     assert.equal(page.requests.length, 2);
-    assert.equal(page.window.location.href, page.initialUrl);
-    const retryAt = Number(page.localStorage.getItem("autoReadRetryAfter"));
-    await page.advance(retryAt - page.now);
+    assert.equal(page.navigations.length, 0);
+    const deadline = Number(page.localStorage.getItem("autoReadRetryAfter"));
+    await page.advance(deadline - page.now + 1000);
     assert.equal(page.requests.length, 2);
-    assert.equal(page.window.location.href, script === "index.js"
-      ? "https://www.uscardforum.com/t/topic/123"
-      : "https://www.uscardforum.com/t/topic/123/4");
+    assert.equal(page.navigations[0], script === "index.js"
+      ? "https://www.uscardforum.com/t/topic/123" : "https://www.uscardforum.com/t/topic/123/4");
     assert.deepEqual(page.errors, []);
-
-    const failingPage = browser(script, { fetch: () => response({}, 503) });
-    failingPage.inject();
-    await failingPage.advance(2000);
-    const firstRetry = Number(failingPage.localStorage.getItem("autoReadRetryAfter"));
-    await failingPage.advance(firstRetry - failingPage.now);
-    assert.equal(failingPage.requests.length, 2);
-    assert.equal(Number(failingPage.localStorage.getItem("autoReadRetryAfter")), firstRetry + 120000);
-    assert.deepEqual(failingPage.errors, []);
   });
 
-  test(`${script}: a hanging request times out and schedules a bounded retry`, async () => {
-    const page = browser(script, {
-      fetch: (url, { signal }) => new Promise((resolve, reject) => {
-        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-      }),
-    });
+  test(`${script}: a hanging request times out while the heartbeat continues`, async () => {
+    const page = browser(script, { fetch: (url, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }) });
     page.inject();
-    await page.advance(2000);
-    await page.advance(15000);
+    await page.advance(21000);
     assert.equal(page.requests.length, 1);
     assert.ok(Number(page.localStorage.getItem("autoReadRetryAfter")) > page.now);
-    assert.equal(page.window.location.href, page.initialUrl);
+    assert.equal(page.window.__autoReadStatus.lastTickAt, 21000);
+    assert.equal(page.navigations.length, 0);
     assert.deepEqual(page.errors, []);
   });
 
-  test(`${script}: stopping while a request is pending prevents navigation`, async () => {
+  test(`${script}: stopping during an outstanding request prevents a later navigation`, async () => {
     let complete;
     const page = browser(script, { fetch: () => new Promise((resolve) => { complete = resolve; }) });
     page.inject();
-    await page.advance(2000);
+    await page.advance(5000);
     assert.equal(page.requests.length, 1);
     page.localStorage.setItem("read", "false");
-    complete(response(script === "index.js" ? topics : posts));
+    complete(response(itemsFor(script)));
     await page.advance(20000);
     assert.equal(page.requests.length, 1);
-    assert.equal(page.window.location.href, page.initialUrl);
+    assert.equal(page.navigations.length, 0);
+    assert.deepEqual(page.errors, []);
+  });
+
+  test(`${script}: one hundred simulated minutes keeps a live loop with bounded retries and timers`, async () => {
+    const page = browser(script, { fetch: () => response({}, 503) });
+    page.inject();
+    await page.advance(100 * 60000);
+    assert.equal(page.window.__autoReadStatus.started, true);
+    assert.equal(page.window.__autoReadStatus.lastTickAt, 100 * 60000);
+    assert.equal(page.localStorage.getItem("read"), "true");
+    assert.ok(page.requests.length > 5 && page.requests.length < 20);
+    assert.ok(page.timerCount <= 2);
     assert.deepEqual(page.errors, []);
   });
 }
 
-test("latest topics: filtered pages yield between requests and stop at the page limit", async () => {
-  const page = browser("index.js", {
-    url: "https://forum.example/t/topic/1",
-    fetch: (url) => {
-      const id = Number(new URL(url).searchParams.get("page")) + 1;
-      return response({ topic_list: { topics: [{ id, posts_count: 9999 }] } });
-    },
-  });
-  page.inject();
-  await flush();
-  assert.equal(page.requests.length, 1);
-  await page.advance(10000);
-  assert.equal(page.requests.length, 10);
-  assert.ok(page.requests.every((url) => new URL(url).origin === "https://forum.example"));
-  assert.equal(page.window.location.href, page.initialUrl);
-  assert.deepEqual(page.errors, []);
-});
-
-test("random likes: queued cancellation and the daily limit keep reading enabled", async () => {
+test("random likes can be cancelled after queueing and before dispatch", async () => {
   let clicks = 0;
-  const buttons = Array.from({ length: 20 }, () => ({ title: "Like this post", dispatchEvent: () => clicks++ }));
-  const page = browser("index.js", { querySelectorAll: () => buttons, random: () => 0 });
+  const { button } = reaction(() => clicks++);
+  const page = browser("index.js", { height: 100000000, querySelectorAll: () => [button] });
   page.localStorage.setItem("autoLikeEnabled", "true");
   page.inject();
   page.localStorage.setItem("autoLikeEnabled", "false");
-  await page.advance(20000);
+  await page.advance(10000);
   assert.equal(clicks, 0);
   assert.equal(page.localStorage.getItem("read"), "true");
-  assert.deepEqual(page.errors, []);
-
-  const enabledPage = browser("index.js", { querySelectorAll: () => buttons, random: () => 0 });
-  enabledPage.localStorage.setItem("autoLikeEnabled", "true");
-  enabledPage.inject();
-  await enabledPage.advance(40000);
-  assert.equal(clicks, 9);
-  assert.equal(enabledPage.localStorage.getItem("clickCounter"), "9");
-  assert.equal(enabledPage.localStorage.getItem("autoLikeEnabled"), "false");
-  assert.equal(enabledPage.localStorage.getItem("read"), "true");
-  assert.deepEqual(enabledPage.errors, []);
 });
 
-for (const script of scripts.slice(1)) {
-  function reactionTarget(onClick) {
-    const reaction = { title: "Like this post", dispatchEvent: onClick };
-    return { getAttribute: () => "Post #1", parentElement: { querySelector: () => reaction } };
-  }
-
-  test(`${script}: manually disabling likes cancels an already scheduled click and keeps reading`, async () => {
-    let clicks = 0;
-    const target = reactionTarget(() => clicks++);
-    const page = browser(script, { querySelectorAll: () => [target] });
-    page.localStorage.setItem("autoLikeEnabled", "true");
-    page.inject();
+test("specific-user likes recheck cancellation after target lookup", async () => {
+  let clicks = 0;
+  const { anchor } = reaction(() => clicks++);
+  const page = browser("index_likeUser.js", { height: 100000000, querySelectorAll: () => {
     page.localStorage.setItem("autoLikeEnabled", "false");
-    await page.advance(2000);
-    assert.equal(clicks, 0);
-    assert.equal(Number(page.localStorage.getItem("clickCounter") || 0), 0);
-    assert.equal(page.localStorage.getItem("read"), "true");
-    assert.equal(page.requests.length, 1);
-    assert.deepEqual(page.errors, []);
-  });
+    return [anchor];
+  } });
+  page.localStorage.setItem("autoLikeEnabled", "true");
+  page.inject();
+  await page.advance(10000);
+  assert.equal(clicks, 0);
+});
 
-  test(`${script}: a 429 pause survives the next page and reading resumes after the cooldown`, async () => {
-    const firstPage = browser(script, { fetch: () => response({}, 429, "120") });
-    firstPage.localStorage.setItem("autoLikeEnabled", "true");
-    firstPage.inject();
-    await firstPage.advance(2000);
-    assert.equal(firstPage.localStorage.getItem("autoLikeEnabled"), "false");
-    let clicks = 0;
-    const target = reactionTarget(() => clicks++);
-    const nextPage = browser(script, {
-      storage: firstPage.localStorage, querySelectorAll: () => [target],
-    });
-    nextPage.inject();
-    await nextPage.advance(2000);
-    assert.equal(clicks, 0);
-    assert.equal(nextPage.localStorage.getItem("read"), "true");
-    assert.equal(nextPage.requests.length, 0);
-    const retryAt = Number(nextPage.localStorage.getItem("autoReadRetryAfter"));
-    await nextPage.advance(retryAt - nextPage.now);
-    assert.equal(nextPage.requests.length, 1);
-    assert.equal(clicks, 0);
-    assert.equal(nextPage.localStorage.getItem("read"), "true");
-    assert.deepEqual(nextPage.errors, []);
-  });
+test("specific-user likes never dispatch on an unrelated seed topic", async () => {
+  let clicks = 0;
+  const { anchor } = reaction(() => clicks++);
+  const page = browser("index_likeUser.js", { target: false, querySelectorAll: () => [anchor] });
+  page.localStorage.setItem("autoLikeEnabled", "true");
+  page.inject();
+  await page.advance(10000);
+  assert.equal(clicks, 0);
+  assert.equal(page.localStorage.getItem("read"), "true");
+});
 
-  test(`${script}: disabling likes during target lookup is checked again before dispatch`, async () => {
-    let clicks = 0;
-    const target = reactionTarget(() => clicks++);
-    const page = browser(script, {
-      querySelectorAll: () => {
-        page.localStorage.setItem("autoLikeEnabled", "false");
-        return [target];
-      },
-    });
-    page.localStorage.setItem("autoLikeEnabled", "true");
-    page.inject();
-    await page.advance(2000);
-    assert.equal(clicks, 0);
-    assert.equal(Number(page.localStorage.getItem("clickCounter") || 0), 0);
-    assert.equal(page.localStorage.getItem("read"), "true");
-    assert.equal(page.requests.length, 1);
-    assert.deepEqual(page.errors, []);
+test("specific-user post numbers are matched exactly, without confusing #1 and #10", async () => {
+  let right = 0;
+  let wrong = 0;
+  const one = reaction(() => right++, 1);
+  const ten = reaction(() => wrong++, 10);
+  const page = browser("index_likeUser.js", {
+    height: 100000000, querySelectorAll: () => [ten.anchor, one.anchor],
+    url: "https://www.uscardforum.com/t/topic/438315",
   });
+  page.localStorage.setItem("autoLikeEnabled", "true");
+  page.inject();
+  await page.advance(10000);
+  assert.equal(right, 1);
+  assert.equal(wrong, 0);
+  assert.deepEqual(page.errors, []);
+});
 
-  test(`${script}: an enabled like still dispatches and counts once`, async () => {
-    let clicks = 0;
-    const target = reactionTarget((event) => { assert.equal(event.type, "click"); clicks++; });
-    const page = browser(script, { querySelectorAll: () => [target] });
-    page.localStorage.setItem("autoLikeEnabled", "true");
-    page.inject();
-    await page.advance(2000);
-    assert.equal(clicks, 1);
-    assert.equal(page.localStorage.getItem("clickCounter"), "1");
-    assert.deepEqual(page.errors, []);
-  });
-
-  test(`${script}: repeated search pages stop and never duplicate queued posts`, async () => {
-    const page = browser(script, {
-      url: "https://forum.example/t/topic/1", fetch: () => response(posts),
-    });
+for (const script of scripts) {
+  test(`${script}: repeated API pages stop and queue only unique posts`, async () => {
+    const page = browser(script, { fetch: () => response(itemsFor(script)) });
     page.inject();
     await page.advance(10000);
     assert.equal(page.requests.length, 2);
-    assert.deepEqual(page.requests.map((url) => new URL(url).searchParams.get("page")), ["1", "2"]);
-    assert.equal(page.window.location.href, "https://forum.example/t/topic/123/4");
-    assert.ok(page.requests.every((url) => new URL(url).origin === "https://forum.example"));
-    assert.equal(page.localStorage.getItem("specificUserPostList"), "[]");
+    assert.equal(page.navigations.length, 1);
+    assert.equal(page.localStorage.getItem(script === "index.js" ? "topicList" : "specificUserPostList"), "[]");
     assert.deepEqual(page.errors, []);
   });
+
+  test(`${script}: a loop exception is exposed to runtime monitoring`, async () => {
+    const page = browser(script, { height: 100000000, querySelectorAll: () => { throw new Error("fixture scan failed"); } });
+    page.localStorage.setItem("autoLikeEnabled", "true");
+    page.inject();
+    assert.match(page.window.__autoReadStatus.error, /fixture scan failed/);
+    assert.ok(page.errors.length > 0);
+  });
 }
+
+test("latest topics skip large threads but stop after the pagination bound", async () => {
+  const page = browser("index.js", { fetch: (url) => {
+    const id = Number(new URL(url).searchParams.get("page")) + 1;
+    return response({ topic_list: { topics: [{ id, posts_count: 9999 }] } });
+  } });
+  page.inject();
+  await page.advance(20000);
+  assert.equal(page.requests.length, 10);
+  assert.equal(page.navigations.length, 0);
+  assert.equal(page.window.__autoReadStatus.phase, "cooldown");
+  assert.deepEqual(page.errors, []);
+});

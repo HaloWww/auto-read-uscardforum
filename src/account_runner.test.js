@@ -39,6 +39,36 @@ test("every batch, including the last, reads until its wall-clock deadline", asy
   assert.ok(results.every((result) => result.success));
 });
 
+test("eight accounts receive all three reading slots of the full 100-minute run", async () => {
+  const clock = fakeClock();
+  const launched = new Map();
+  const closed = new Map();
+  const deadlines = [];
+  const accounts = Array.from({ length: 8 }, (_, index) => index + 1);
+  const results = await runAccountBatches(accounts, {
+    maxConcurrentAccounts: 3,
+    runTimeMillis: 100 * 60000,
+    delayBetweenInstances: 10000,
+    ...clock,
+    onBatch: ({ deadline }) => deadlines.push(deadline),
+    launch: async (account) => {
+      launched.set(account, clock.now());
+      return account;
+    },
+    close: async (account) => closed.set(account, clock.now()),
+  });
+
+  assert.deepEqual(deadlines, [2000000, 4000000, 6000000]);
+  assert.equal(clock.now(), 6000000);
+  assert.equal(closed.size, 8);
+  for (const account of accounts) {
+    assert.ok(closed.get(account) - launched.get(account) >= 1980000, `account ${account} lost its reading slot`);
+  }
+  assert.equal(closed.get(7), 6000000);
+  assert.equal(closed.get(8), 6000000);
+  assert.ok(results.every((result) => result.success));
+});
+
 test("one account failure leaves its peers and later batches running", async () => {
   const clock = fakeClock();
   const closed = [];

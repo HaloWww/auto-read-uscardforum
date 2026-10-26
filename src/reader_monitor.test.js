@@ -81,13 +81,14 @@ function fixture(options = {}) {
   return { clock, page, browser, failures, logs, monitor, setPage: (next) => { current = next; } };
 }
 
-test("monitor samples persistent activity counters without Runtime console events and matches main-frame POST responses", async () => {
+test("monitor samples persistent activity counters without Runtime console events and matches main-frame POST/PUT responses", async () => {
   const { page, monitor, clock, logs, failures } = fixture();
   monitor.attach(page).start();
   assert.equal(page.listenerCount("console"), 0);
   Object.assign(page.counters, { documents: 1, scrolls: 4, topicTransitions: 1, likeAttempts: 2 });
   page.response();
   page.response({ path: "/post_actions", status: 201 });
+  page.response({ method: "PUT" });
   page.response({ status: 429 });
   page.response({ status: 500 });
   page.response({ method: "GET" });
@@ -97,9 +98,9 @@ test("monitor samples persistent activity counters without Runtime console event
   await clock.advance(60000);
   assert.deepEqual(monitor.stop(), {
     documents: 1, scrolls: 4, topicTransitions: 1, likeAttempts: 2,
-    likeAccepted: 2, rateLimits: 1, checks: 1, elapsedMillis: 60000,
+    likeAccepted: 3, rateLimits: 1, checks: 1, elapsedMillis: 60000,
   });
-  assert.ok(logs.some((line) => line.includes("已运行 1 分钟") && line.includes("点赞 HTTP 2xx 2")));
+  assert.ok(logs.some((line) => line.includes("已运行 1 分钟") && line.includes("点赞 HTTP 2xx 3")));
   assert.ok(logs.every((line) => !line.includes("https://")));
   assert.deepEqual(failures, []);
 });

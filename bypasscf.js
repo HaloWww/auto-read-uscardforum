@@ -6,20 +6,29 @@ import { runAccountBatches } from "./src/account_runner.js";
 import { getProxyConfig, getPuppeteerProxyArgs } from "./src/proxy_config.js";
 import { startReader, pauseLikes } from "./src/reader_session.js";
 import { createReaderMonitor } from "./src/reader_monitor.js";
+import { createRotationStore } from "./src/rotation_store.js";
+import { getRotationAccountId } from "./src/weekly_rotation.js";
+import { prepareLikeRotation, previewLikeRotation } from "./src/like_rotation.js";
+import { createSpecificLikeObserver } from "./src/specific_like_observer.js";
 
-const accounts = parseAccounts(process.env.USERNAMES, process.env.PASSWORDS);
+const configuredAccounts = parseAccounts(process.env.USERNAMES, process.env.PASSWORDS);
+let accounts = configuredAccounts;
+let rotation;
 const runTimeMillis = positiveInteger(process.env.RUN_TIME_LIMIT_MINUTES, 100, "RUN_TIME_LIMIT_MINUTES") * 60000;
 const maxConcurrentAccounts = positiveInteger(process.env.MAX_CONCURRENT_ACCOUNTS, 3, "MAX_CONCURRENT_ACCOUNTS");
 const navigationTimeout = positiveInteger(process.env.NAV_TIMEOUT_MS, 60000, "NAV_TIMEOUT_MS");
 const loginUrl = new URL(process.env.WEBSITE || "https://www.uscardforum.com").origin;
 const autoLike = process.env.AUTO_LIKE !== "false";
 const specificUser = process.env.SPECIFIC_USER || "halowang";
-const scriptName = process.env.LIKE_SPECIFIC_USER === "true" ? "index_likeUser.js" : "index.js";
+const likeSpecificUser = process.env.LIKE_SPECIFIC_USER === "true";
+const scriptName = likeSpecificUser ? "index_likeUser.js" : "index.js";
 const script = readFileSync(new URL(scriptName, import.meta.url), "utf8");
 const proxyConfig = getProxyConfig();
 const activeBrowsers = new Set();
 const runtimeErrors = new Map();
 const monitors = new Map();
+const likeObservers = new Map();
+const confirmedAccounts = new Set();
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 for (const event of ["unhandledRejection", "uncaughtException"]) {
@@ -52,6 +61,14 @@ async function notify(message) {
 
 async function closeBrowser(browser) {
   if (!browser) return;
+  const observer = likeObservers.get(browser);
+  if (observer) {
+    observer.stop();
+    await observer.flush().catch((error) => {
+      if (!runtimeErrors.has(browser)) runtimeErrors.set(browser, error);
+    });
+    likeObservers.delete(browser);
+  }
   const monitor = monitors.get(browser);
   if (monitor) {
     await monitor.sample().catch((error) => {
@@ -150,6 +167,26 @@ async function launchAccount({ username, password }, index) {
         page = targetPage;
         targetPage.on("response", onResponse);
         monitor.attach(targetPage);
+        if (rotation) {
+          const previous = likeObservers.get(browser);
+          previous?.stop();
+          await previous?.flush();
+          const accountId = getRotationAccountId(username, loginUrl);
+          likeObservers.set(browser, createSpecificLikeObserver(targetPage, {
+            targetUser: specificUser, origin: loginUrl,
+            onConfirmed: async () => {
+              try {
+                await rotation.complete(accountId);
+                confirmedAccounts.add(accountId);
+                console.log(`${label}：服务端已确认给指定用户点赞，本周期完成记录已保存`);
+              } catch (error) {
+                runtimeErrors.set(browser, error);
+                console.error(`${label}：点赞成功但轮换记录保存失败：${error.message}`);
+                throw error;
+              }
+            },
+          }));
+        }
       },
       onRecovery: (error) => console.warn(`${label}：阅读页面会话失效，保留登录状态恢复一次：${error.message}`),
     });
@@ -166,32 +203,66 @@ async function launchAccount({ username, password }, index) {
   }
 }
 
-console.log(`正式阅读：${accounts.length} 个账号，并发 ${maxConcurrentAccounts}，总时长 ${runTimeMillis / 60000} 分钟 (${runTimeMillis}ms)`);
-console.log(`计划结束时间：${new Date(Date.now() + runTimeMillis).toISOString()}`);
-const watchdog = setTimeout(() => {
-  console.error("运行预算及清理宽限期已耗尽");
-  process.exit(1);
-}, runTimeMillis + 120000);
-try {
-  const results = await runAccountBatches(accounts, {
-    maxConcurrentAccounts, runTimeMillis,
-    launch: launchAccount, close: closeBrowser,
-    onBatch: ({ startIndex, endIndex }) => console.log(`当前批次：${startIndex + 1} - ${endIndex}`),
-  });
-  let failed = 0;
-  for (const result of results) {
-    const error = result.error || result.closeError || runtimeErrors.get(result.value);
-    if (error) {
-      failed++;
-      console.error(`账号 #${result.index + 1} 失败：${error.message}`);
+async function main() {
+  if (likeSpecificUser) {
+    const options = { origin: loginUrl, targetUser: specificUser };
+    if (process.env.PREVIEW_LIKE_ROTATION === "true") {
+      console.log(`仅预览新四周轮换：配置 ${configuredAccounts.length} 个账号，不登录、不点赞、不保存进度`);
+      for (const plan of previewLikeRotation(configuredAccounts, options)) {
+        console.log(`第 ${plan.week} 周：${plan.selectedIndexes.length} 个账号，配置序号 ${plan.selectedIndexes.map((index) => index + 1).join(", ") || "无，全部休眠"}`);
+      }
+      return;
+    }
+    if (!autoLike) {
+      console.log("特定用户自动点赞已关闭，本次不启动账号、不推进四周轮换");
+      return;
+    }
+    rotation = await prepareLikeRotation(configuredAccounts, { ...options, store: createRotationStore() });
+    accounts = rotation.plan.selectedAccounts;
+    console.log(`四周轮换第 ${rotation.plan.weekIndex} 周：配置 ${configuredAccounts.length} 个账号，本周期已完成 ${rotation.plan.completed} 个，本次执行 ${accounts.length} 个，其他账号休眠`);
+    console.log(`本周执行的配置序号：${rotation.plan.selectedIndexes.map((index) => index + 1).join(", ") || "无"}`);
+    if (rotation.plan.overdue) console.warn("本周期仍有未完成账号，本次先补齐，不清空已有完成记录");
+    if (!accounts.length) {
+      console.log("本周没有待执行账号，不启动浏览器");
+      return;
     }
   }
-  console.log(`账号任务完成：${results.length - failed} 成功，${failed} 失败`);
-  if (failed) process.exitCode = 1;
-} catch (error) {
-  console.error("账号任务失败：", error.message);
-  process.exitCode = 1;
-} finally {
-  await Promise.allSettled([...activeBrowsers].map(closeBrowser));
-  clearTimeout(watchdog);
+  console.log(`正式阅读：${accounts.length} 个账号，并发 ${maxConcurrentAccounts}，总时长 ${runTimeMillis / 60000} 分钟 (${runTimeMillis}ms)`);
+  console.log(`计划结束时间：${new Date(Date.now() + runTimeMillis).toISOString()}`);
+  const watchdog = setTimeout(() => {
+    console.error("运行预算及清理宽限期已耗尽");
+    process.exit(1);
+  }, runTimeMillis + 120000);
+  try {
+    const results = await runAccountBatches(accounts, {
+      maxConcurrentAccounts, runTimeMillis,
+      launch: (account) => launchAccount(account, configuredAccounts.indexOf(account)), close: closeBrowser,
+      onBatch: ({ startIndex, endIndex }) => console.log(`当前批次：${startIndex + 1} - ${endIndex}`),
+    });
+    let failed = 0;
+    if (rotation) await rotation.flush();
+    for (const result of results) {
+      let error = result.error || result.closeError || runtimeErrors.get(result.value);
+      if (!error && rotation && !confirmedAccounts.has(getRotationAccountId(result.account, loginUrl))) {
+        error = new Error("本次未确认给指定用户点赞成功，账号保留在未完成列表中");
+      }
+      if (error) {
+        failed++;
+        console.error(`账号 #${configuredAccounts.indexOf(result.account) + 1} 失败：${error.message}`);
+      }
+    }
+    console.log(`账号任务完成：${results.length - failed} 成功，${failed} 失败`);
+    if (failed) process.exitCode = 1;
+  } catch (error) {
+    console.error("账号任务失败：", error.message);
+    process.exitCode = 1;
+  } finally {
+    await Promise.allSettled([...activeBrowsers].map(closeBrowser));
+    clearTimeout(watchdog);
+  }
 }
+
+await main().catch((error) => {
+  console.error(`任务启动失败：${error.message}`);
+  process.exitCode = 1;
+});

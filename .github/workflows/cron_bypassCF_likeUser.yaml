@@ -9,13 +9,17 @@ on:
         description: '正式阅读总时长（分钟）'
         type: number
         default: 20
+      preview_rotation:
+        description: '仅预览四周账号分配，不登录、不点赞、不推进进度'
+        type: boolean
+        default: false
 
 concurrency:
   group: forum-reading-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   run:
@@ -29,6 +33,8 @@ jobs:
       MAX_CONCURRENT_ACCOUNTS: ${{ secrets.MAX_CONCURRENT_ACCOUNTS || '3' }}
       NAV_TIMEOUT_MS: ${{ secrets.NAV_TIMEOUT_MS || '60000' }}
       LIKE_SPECIFIC_USER: 'true'
+      PREVIEW_LIKE_ROTATION: ${{ inputs.preview_rotation || false }}
+      GITHUB_TOKEN: ${{ github.token }}
       SPECIFIC_USER: ${{ secrets.SPECIFIC_USER || 'halowang' }}
       AUTO_LIKE: ${{ secrets.AUTO_LIKE || 'true' }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

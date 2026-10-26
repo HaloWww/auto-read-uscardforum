@@ -54,7 +54,7 @@ export function createReaderMonitor({
       if (page !== getPage()) return;
       try {
         const request = response.request();
-        if (request.method() !== "POST" || request.frame() !== page.mainFrame()) return;
+        if (!["POST", "PUT"].includes(request.method()) || request.frame() !== page.mainFrame()) return;
         const url = new URL(response.url());
         if (url.origin !== new URL(page.url()).origin || !/reaction|post_actions|\/like/i.test(url.pathname)) return;
         const status = response.status();

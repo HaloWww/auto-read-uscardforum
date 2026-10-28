@@ -2,7 +2,7 @@ name: readLike
 
 on:
   schedule:
-    - cron: '40 13 * * *'
+    - cron: '38 7 * * *'
   workflow_dispatch:
     inputs:
       run_time_minutes:

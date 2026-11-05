@@ -2,7 +2,7 @@ name: likeUser
 
 on:
   schedule:
-    - cron: '22 5 * * 6'
+    - cron: '11 0 * * 6'
   workflow_dispatch:
     inputs:
       run_time_minutes:

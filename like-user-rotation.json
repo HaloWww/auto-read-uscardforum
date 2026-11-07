@@ -2,7 +2,7 @@
   "version": 1,
   "contextHash": "8cd9dc090f344d6f6ec6811f05f22450f124e904720bd5c9c75cbd45dd1d0474",
   "startWeek": 2965,
-  "lastWeek": 2965,
+  "lastWeek": 2966,
   "accountIds": [
     "280e08f7cd794dd71e97ee86a33e2bd0ae80399b919f6e6daeebf1672d0e45e2",
     "72a901be406ecef37dd6cb5107d5b99c25b487ef790cb2825d586b72d90a7623",
@@ -21,6 +21,10 @@
     "2965": [
       "a21d8b3268dd303841e2ae953c8a254fc35654ae60de9e729636438f2b562c52",
       "280e08f7cd794dd71e97ee86a33e2bd0ae80399b919f6e6daeebf1672d0e45e2"
+    ],
+    "2966": [
+      "8db3604276f462bdee0fd84a4c994c3bb21eb89941e61512cecbab7948a504cc",
+      "72a901be406ecef37dd6cb5107d5b99c25b487ef790cb2825d586b72d90a7623"
     ]
   }
 }
